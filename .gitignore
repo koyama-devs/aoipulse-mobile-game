@@ -9,6 +9,11 @@
 *.aab
 *.ipa
 
+# Server
+server/node_modules/
+server/data.json
+server/package-lock.json
+
 # OS
 .DS_Store
 Thumbs.db
