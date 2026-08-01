@@ -4,16 +4,18 @@ extends Node
 signal request_ok(kind: String, data: Dictionary)
 signal request_fail(kind: String, message: String)
 
-const DEFAULT_URL := "http://127.0.0.1:8787"
+const DEFAULT_URL := "https://aoipulse-server.onrender.com"
 const CONFIG_PATH := "user://online_config.cfg"
 const PROFILE_PATH := "user://profile.cfg"
 
 var base_url: String = DEFAULT_URL
 var player_id: String = ""
-var player_name: String = "Player"
+var player_name: String = ""
 var player_xp: int = 0
 var room_code: String = ""
 var http: HTTPRequest
+
+const NAME_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 func _ready() -> void:
 	http = HTTPRequest.new()
@@ -23,20 +25,51 @@ func _ready() -> void:
 	_load_config()
 	_load_profile()
 
-func _load_config() -> void:
-	var cfg := ConfigFile.new()
-	if cfg.load(CONFIG_PATH) == OK:
-		base_url = String(cfg.get_value("online", "base_url", DEFAULT_URL)).rstrip("/")
-	else:
-		# Optional project file for shipped default server.
-		if FileAccess.file_exists("res://online_config.json"):
-			var f := FileAccess.open("res://online_config.json", FileAccess.READ)
-			if f:
-				var parsed = JSON.parse_string(f.get_as_text())
-				f.close()
-				if typeof(parsed) == TYPE_DICTIONARY and parsed.has("base_url"):
-					base_url = String(parsed["base_url"]).rstrip("/")
+func generate_default_name() -> String:
+	# Short default so first launch needs no Settings visit.
+	var s := "Player"
+	for i in 4:
+		s += NAME_CHARS[randi() % NAME_CHARS.length()]
+	return s
 
+func ensure_display_name() -> String:
+	var n := player_name.strip_edges()
+	if n.is_empty() or n == "プレイヤー" or n.begins_with("ゲスト"):
+		player_name = generate_default_name()
+		_save_profile()
+	return player_name
+
+func _shipped_base_url() -> String:
+	# Packaged default so installs work without Settings setup.
+	if FileAccess.file_exists("res://online_config.json"):
+		var f := FileAccess.open("res://online_config.json", FileAccess.READ)
+		if f:
+			var parsed = JSON.parse_string(f.get_as_text())
+			f.close()
+			if typeof(parsed) == TYPE_DICTIONARY and parsed.has("base_url"):
+				var u := String(parsed["base_url"]).rstrip("/")
+				if not u.is_empty():
+					return u
+	return DEFAULT_URL
+
+func _is_local_dev_url(url: String) -> bool:
+	var u := url.to_lower()
+	return u.contains("127.0.0.1") or u.contains("localhost") or u.contains("10.0.2.2")
+
+func _load_config() -> void:
+	var shipped := _shipped_base_url()
+	base_url = shipped
+	var cfg := ConfigFile.new()
+	if cfg.load(CONFIG_PATH) != OK:
+		return
+	var saved := String(cfg.get_value("online", "base_url", "")).rstrip("/")
+	# Keep a user override only when it is a real remote server.
+	# Old local/dev URLs are ignored so fresh APKs use the shipped Render host.
+	if saved != "" and not _is_local_dev_url(saved):
+		base_url = saved
+	elif _is_local_dev_url(saved):
+		# Migrate leftover localhost from earlier builds.
+		save_base_url(shipped)
 func save_base_url(url: String) -> void:
 	base_url = url.rstrip("/")
 	var cfg := ConfigFile.new()
@@ -46,10 +79,13 @@ func save_base_url(url: String) -> void:
 func _load_profile() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(PROFILE_PATH) != OK:
+		player_name = generate_default_name()
+		_save_profile()
 		return
 	player_id = String(cfg.get_value("profile", "player_id", ""))
-	player_name = String(cfg.get_value("profile", "player_name", "Player"))
+	player_name = String(cfg.get_value("profile", "player_name", "")).strip_edges()
 	player_xp = int(cfg.get_value("profile", "xp", 0))
+	ensure_display_name()
 
 func _save_profile() -> void:
 	var cfg := ConfigFile.new()
@@ -74,7 +110,7 @@ func _request(kind: String, method: int, path: String, body: Dictionary = {}) ->
 func register_player(display_name: String) -> void:
 	player_name = display_name.strip_edges().substr(0, 16)
 	if player_name.is_empty():
-		player_name = "Player"
+		player_name = ensure_display_name()
 	_request("register", HTTPClient.METHOD_POST, "/api/player/register", {
 		"name": player_name,
 		"playerId": player_id,
@@ -107,12 +143,13 @@ func poll_room() -> void:
 		return
 	_request("poll_room", HTTPClient.METHOD_GET, "/api/rooms/%s" % room_code)
 
-func finish_room(score: int, lines: int, time_ms: int) -> void:
+func finish_room(score: int, lines: int, time_ms: int, stage: int = 1) -> void:
 	_request("finish_room", HTTPClient.METHOD_POST, "/api/rooms/%s/finish" % room_code, {
 		"playerId": player_id,
 		"score": score,
 		"lines": lines,
 		"timeMs": time_ms,
+		"stage": stage,
 	})
 
 func fetch_leaderboard(board: String) -> void:

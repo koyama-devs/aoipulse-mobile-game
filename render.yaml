@@ -1,0 +1,12 @@
+# Render Blueprint — deploy from this repo with Root Directory = server
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: aoipulse-server
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health

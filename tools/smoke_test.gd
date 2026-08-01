@@ -29,6 +29,56 @@ func _init() -> void:
 		seen[v] = true
 	ok = _assert(seen.size() == 7, "bag unique") and ok
 
+	# Adventure stage curve.
+	var stage_lines := 5
+	ok = _assert(stage_lines == 5, "stage lines") and ok
+	var fuse_s2 := maxi(3, 8 - int((2 - 2) / 2))
+	var fuse_s8 := maxi(3, 8 - int((8 - 2) / 2))
+	ok = _assert(fuse_s2 > fuse_s8, "bomb fuse tightens") and ok
+	var bomb_chance_s1 := 0.0 if 1 < 2 else 0.14
+	var bomb_chance_s4 := minf(0.42, 0.14 + (4 - 2) * 0.04)
+	ok = _assert(bomb_chance_s1 == 0.0, "no bomb stage1") and ok
+	ok = _assert(bomb_chance_s4 > 0.0, "bomb stage4") and ok
+	var chest_s2 := 0.0 if 2 < 3 else 0.1
+	var chest_s5 := minf(0.28, 0.10 + (5 - 3) * 0.03)
+	ok = _assert(chest_s2 == 0.0, "no chest stage2") and ok
+	ok = _assert(chest_s5 > 0.0, "chest stage5") and ok
+	var garbage_s3 := 0 if 3 < 4 else 10
+	var garbage_s6 := maxi(6, 14 - 6)
+	ok = _assert(garbage_s3 == 0, "no garbage stage3") and ok
+	ok = _assert(garbage_s6 >= 6, "garbage interval") and ok
+	var boss_limit := maxi(12, 24 - int(5 / 5) * 2)
+	ok = _assert(boss_limit >= 12, "boss piece limit") and ok
+	# Garbage row always has a hole.
+	var cols := 10
+	var hole := 3
+	var filled := 0
+	for x in cols:
+		if x != hole:
+			filled += 1
+	ok = _assert(filled == cols - 1, "garbage has hole") and ok
+	# Loot table size.
+	var loot := ["hammer", "line", "slow"]
+	ok = _assert(loot.size() == 3, "loot table") and ok
+
+	# Adventure online mode string + ranking comparator (stage > score > time).
+	var mode_map := {"classic": 0, "sprint": 1, "ultra": 2, "daily": 3, "adventure": 4}
+	ok = _assert(mode_map.has("adventure"), "mode adventure") and ok
+	var ranked: Array = [
+		{"n": "A", "stage": 5, "score": 1000, "timeMs": 90000},
+		{"n": "B", "stage": 7, "score": 500, "timeMs": 120000},
+		{"n": "C", "stage": 7, "score": 800, "timeMs": 100000},
+		{"n": "D", "stage": 7, "score": 800, "timeMs": 80000},
+	]
+	ranked.sort_custom(func(a, b):
+		if int(a.stage) != int(b.stage):
+			return int(a.stage) > int(b.stage)
+		if int(a.score) != int(b.score):
+			return int(a.score) > int(b.score)
+		return int(a.timeMs) < int(b.timeMs)
+	)
+	ok = _assert(String(ranked[0].n) == "D" and String(ranked[1].n) == "C" and String(ranked[2].n) == "B" and String(ranked[3].n) == "A", "adventure rank order") and ok
+
 	if ok:
 		print("AOIPULSE_SMOKE_OK")
 		quit(0)

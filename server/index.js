@@ -11,16 +11,28 @@ const PORT = Number(process.env.PORT || 8787);
 const roomCode = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
 const idGen = customAlphabet("abcdefghijklmnopqrstuvwxyz0123456789", 16);
 
-const MODES = new Set(["classic", "sprint", "ultra", "daily"]);
+const MODES = new Set(["classic", "sprint", "ultra", "daily", "adventure"]);
+
+function emptyLeaderboards() {
+  return { daily: {}, sprint: [], ultra: [], classic: [], adventure: [] };
+}
 
 function loadDb() {
   if (!fs.existsSync(DATA_PATH)) {
-    return { players: {}, rooms: {}, leaderboards: { daily: {}, sprint: [], ultra: [], classic: [] } };
+    return { players: {}, rooms: {}, leaderboards: emptyLeaderboards() };
   }
   try {
-    return JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
+    const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
+    raw.leaderboards = raw.leaderboards || {};
+    for (const k of ["sprint", "ultra", "classic", "adventure"]) {
+      if (!Array.isArray(raw.leaderboards[k])) raw.leaderboards[k] = [];
+    }
+    if (!raw.leaderboards.daily || typeof raw.leaderboards.daily !== "object") {
+      raw.leaderboards.daily = {};
+    }
+    return raw;
   } catch {
-    return { players: {}, rooms: {}, leaderboards: { daily: {}, sprint: [], ultra: [], classic: [] } };
+    return { players: {}, rooms: {}, leaderboards: emptyLeaderboards() };
   }
 }
 
@@ -62,9 +74,19 @@ function publicRoom(room) {
       score: p.score ?? 0,
       lines: p.lines ?? 0,
       timeMs: p.timeMs ?? 0,
+      stage: p.stage ?? 1,
       result: p.result ?? null,
     })),
   };
+}
+
+function compareAdventure(a, b) {
+  const sa = a.stage || 1;
+  const sb = b.stage || 1;
+  if (sb !== sa) return sb - sa;
+  const sc = (b.score || 0) - (a.score || 0);
+  if (sc !== 0) return sc;
+  return (a.timeMs || 1e12) - (b.timeMs || 1e12);
 }
 
 function rankRoomPlayers(room) {
@@ -72,6 +94,9 @@ function rankRoomPlayers(room) {
   if (room.mode === "sprint") {
     // Lower time is better; incomplete last.
     return [...finished].sort((a, b) => (a.timeMs || 1e12) - (b.timeMs || 1e12));
+  }
+  if (room.mode === "adventure") {
+    return [...finished].sort(compareAdventure);
   }
   // Higher score wins (ultra/classic/daily)
   return [...finished].sort((a, b) => (b.score || 0) - (a.score || 0));
@@ -81,6 +106,7 @@ function pushLeaderboard(list, entry, limit = 50) {
   const next = [...list.filter((e) => e.playerId !== entry.playerId), entry];
   next.sort((a, b) => {
     if (entry.board === "sprint") return (a.timeMs || 1e12) - (b.timeMs || 1e12);
+    if (entry.board === "adventure") return compareAdventure(a, b);
     return (b.score || 0) - (a.score || 0);
   });
   return next.slice(0, limit);
@@ -129,7 +155,7 @@ app.post("/api/rooms", (req, res) => {
   const player = db.players[playerId];
   if (!player) return res.status(400).json({ error: "Unknown player" });
   if (!MODES.has(mode) || mode === "daily") {
-    return res.status(400).json({ error: "Room mode must be classic, sprint, or ultra" });
+    return res.status(400).json({ error: "Room mode must be classic, sprint, ultra, or adventure" });
   }
   let code = roomCode();
   while (db.rooms[code]) code = roomCode();
@@ -210,6 +236,7 @@ app.get("/api/rooms/:code", (req, res) => {
     score: p.score || 0,
     lines: p.lines || 0,
     timeMs: p.timeMs || 0,
+    stage: p.stage || 1,
   }));
   res.json({ room: publicRoom(room), ranking: ranked });
 });
@@ -231,15 +258,17 @@ app.post("/api/rooms/:code/finish", (req, res) => {
   const lines = Math.max(0, Math.min(1000, Number(req.body?.lines) || 0));
   let timeMs = Math.max(0, Math.min(3_600_000, Number(req.body?.timeMs) || 0));
   if (!timeMs && room.startedAt) timeMs = Date.now() - room.startedAt;
+  const stage = Math.max(1, Math.min(999, Number(req.body?.stage) || 1));
 
   p.finished = true;
   p.score = score;
   p.lines = lines;
   p.timeMs = timeMs;
-  p.result = { score, lines, timeMs, at: Date.now() };
+  p.stage = stage;
+  p.result = { score, lines, timeMs, stage, at: Date.now() };
 
   // XP reward
-  player.xp = (player.xp || 0) + Math.max(10, Math.floor(score / 100) + lines * 2);
+  player.xp = (player.xp || 0) + Math.max(10, Math.floor(score / 100) + lines * 2 + stage * 5);
 
   // Global boards
   const entry = {
@@ -248,6 +277,7 @@ app.post("/api/rooms/:code/finish", (req, res) => {
     score,
     lines,
     timeMs,
+    stage,
     mode: room.mode,
     board: room.mode,
     at: Date.now(),
@@ -265,6 +295,7 @@ app.post("/api/rooms/:code/finish", (req, res) => {
     score: rp.score || 0,
     lines: rp.lines || 0,
     timeMs: rp.timeMs || 0,
+    stage: rp.stage || 1,
   }));
   res.json({ room: publicRoom(room), ranking: ranked, player: publicPlayer(player) });
 });
@@ -319,6 +350,6 @@ app.get("/api/daily", (_req, res) => {
   res.json({ day, seed: dailySeed(day) });
 });
 
-app.listen(PORT, () => {
-  console.log(`AOIPulse server on http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`AOIPulse server on http://0.0.0.0:${PORT}`);
 });
