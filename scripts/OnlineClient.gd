@@ -19,7 +19,8 @@ const NAME_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 func _ready() -> void:
 	http = HTTPRequest.new()
-	http.timeout = 12.0
+	# Render free tier can take 30–60s to wake from sleep.
+	http.timeout = 55.0
 	add_child(http)
 	http.request_completed.connect(_on_request_completed)
 	_load_config()
@@ -138,10 +139,19 @@ func start_room() -> void:
 		"playerId": player_id,
 	})
 
-func poll_room() -> void:
+func poll_room(since_event_id: int = 0) -> void:
 	if room_code.is_empty():
 		return
-	_request("poll_room", HTTPClient.METHOD_GET, "/api/rooms/%s" % room_code)
+	var q := ""
+	if since_event_id > 0:
+		q = "?since=%d" % since_event_id
+	_request("poll_room", HTTPClient.METHOD_GET, "/api/rooms/%s%s" % [room_code, q])
+
+func send_attack(type: String) -> void:
+	_request("send_attack", HTTPClient.METHOD_POST, "/api/rooms/%s/attack" % room_code, {
+		"playerId": player_id,
+		"type": type,
+	})
 
 func finish_room(score: int, lines: int, time_ms: int, stage: int = 1) -> void:
 	_request("finish_room", HTTPClient.METHOD_POST, "/api/rooms/%s/finish" % room_code, {
@@ -170,11 +180,24 @@ func submit_daily(score: int, lines: int, time_ms: int, seed: int) -> void:
 func health() -> void:
 	_request("health", HTTPClient.METHOD_GET, "/api/health")
 
+func clear_player_id() -> void:
+	player_id = ""
+	_save_profile()
+
+func _network_fail_message(result: int) -> String:
+	match result:
+		HTTPRequest.RESULT_TIMEOUT:
+			return "接続タイムアウト（サーバー起動待ち〜60秒。もう一度お試しください）"
+		HTTPRequest.RESULT_CANT_CONNECT, HTTPRequest.RESULT_CANT_RESOLVE:
+			return "サーバーに接続できません。ネットとURLを確認してください"
+		_:
+			return "ネットワークエラー（%d）" % result
+
 func _on_request_completed(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	var kind := _pending_kind
 	_pending_kind = ""
 	if result != HTTPRequest.RESULT_SUCCESS:
-		request_fail.emit(kind, "Network error")
+		request_fail.emit(kind, _network_fail_message(result))
 		return
 	var text := body.get_string_from_utf8()
 	var parsed = JSON.parse_string(text)
@@ -196,7 +219,7 @@ func _on_request_completed(result: int, response_code: int, _headers: PackedStri
 				player_name = String(p.get("name", player_name))
 				player_xp = int(p.get("xp", player_xp))
 				_save_profile()
-		"create_room", "join_room", "ready", "start_room", "poll_room", "finish_room":
+		"create_room", "join_room", "ready", "start_room", "poll_room", "finish_room", "send_attack":
 			if data.has("room"):
 				var room: Dictionary = data["room"]
 				room_code = String(room.get("code", room_code))

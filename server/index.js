@@ -225,7 +225,10 @@ app.post("/api/rooms/:code/start", (req, res) => {
   const room = db.rooms[code];
   if (!room) return res.status(404).json({ error: "Room not found" });
   if (room.hostId !== playerId) return res.status(403).json({ error: "Only host can start" });
-  if (room.status !== "lobby") return res.status(400).json({ error: "Already started" });
+  // lobby = first match; finished = rematch after everyone is done
+  if (room.status !== "lobby" && room.status !== "finished") {
+    return res.status(400).json({ error: "Match already in progress" });
+  }
   if (room.players.length < 1) return res.status(400).json({ error: "Need players" });
   room.status = "playing";
   room.seed = (Math.random() * 0xffffffff) >>> 0;

@@ -137,6 +137,11 @@ var status_msg := ""
 var pending_create_mode := ""
 var pending_join_code := ""
 var pending_daily := false
+var last_online_create_mode := ""
+var online_reregister_tries := 0
+var room_status := "lobby"
+var forfeit_armed := false
+var last_started_seed := 0
 
 # Adventure mode state
 var meta: Array = []
@@ -265,7 +270,7 @@ func _cycle_attack_type() -> void:
 	_refresh_attack_btn()
 
 func _on_attack_btn() -> void:
-	if not _pvp_attacks_enabled() or screen != Screen.PLAY or paused or countdown > 0.0:
+	if not _pvp_attacks_enabled() or screen != Screen.PLAY or paused or forfeit_armed or countdown > 0.0:
 		return
 	if attack_charges <= 0:
 		_cycle_attack_type()
@@ -485,14 +490,18 @@ func _show_online() -> void:
 	_hide_all_panels()
 	_fade_in_panel()
 	online_root.visible = true
-	status_msg = "部屋をつくる、またはコードを入力して参加します。"
+	online_reregister_tries = 0
+	# Wake Render free tier + refresh player id (DB may have been wiped).
+	status_msg = "サーバーに接続中…（初回は数十秒かかることがあります）"
 	_refresh_status()
-	if online and online.player_id == "":
+	if online:
 		online.register_player(online.ensure_display_name())
 	queue_redraw()
 
 func _show_room() -> void:
 	screen = Screen.ROOM
+	paused = false
+	forfeit_armed = false
 	_hide_all_panels()
 	_fade_in_panel()
 	room_root.visible = true
@@ -530,10 +539,18 @@ func _start_local(m: Mode) -> void:
 
 func _begin_play() -> void:
 	screen = Screen.PLAY
+	paused = false
+	forfeit_armed = false
 	_hide_all_panels()
 	hud_root.visible = true
 	pad_root.visible = true
 	pause_btn.visible = true
+	if online_match:
+		pause_btn.text = "×"
+		pause_btn.set_meta("primary", false)
+		_apply_button_style(pause_btn, false)
+	else:
+		pause_btn.text = "II"
 	countdown = 3.0 if online_match else 0.0
 	_reset_game()
 	_refresh_item_btn()
@@ -1326,7 +1343,7 @@ func _process(delta: float) -> void:
 			b["pos"] = p2
 		queue_redraw()
 		return
-	if screen != Screen.PLAY or paused:
+	if screen != Screen.PLAY or paused or forfeit_armed:
 		queue_redraw()
 		return
 	if countdown > 0.0:
@@ -1445,6 +1462,14 @@ func _handle_touch(e: InputEventScreenTouch) -> void:
 			else:
 				_show_mode()
 			return
+		# Cancel online forfeit confirm.
+		if screen == Screen.PLAY and online_match and forfeit_armed:
+			if pause_btn and pause_btn.visible and pause_btn.get_global_rect().has_point(e.position):
+				return
+			forfeit_armed = false
+			overlay.visible = false
+			queue_redraw()
+			return
 		# Tap anywhere (except the pause button itself) to resume.
 		if screen == Screen.PLAY and paused:
 			if pause_btn and pause_btn.visible and pause_btn.get_global_rect().has_point(e.position):
@@ -1498,10 +1523,18 @@ func _on_drop_btn() -> void:
 	_hard_drop()
 
 func _toggle_pause() -> void:
-	if screen != Screen.PLAY or online_match:
-		# No pause mid online race — keep fair.
-		if screen == Screen.PLAY and online_match:
-			_show_toast("対戦中は一時停止できません", 0.8)
+	if screen != Screen.PLAY:
+		return
+	# Online: no pause — × confirms forfeit back to room.
+	if online_match:
+		if forfeit_armed:
+			_forfeit_online()
+			return
+		forfeit_armed = true
+		overlay.visible = true
+		overlay_title.text = "対戦をやめる？"
+		overlay_sub.text = "もう一度 × で棄権してルームへ戻ります\n（現在のスコアで終了扱い）\n画面をタップでキャンセル"
+		queue_redraw()
 		return
 	paused = not paused
 	pause_btn.text = "▶" if paused else "II"
@@ -1528,6 +1561,7 @@ func _on_online_ok(kind: String, data: Dictionary) -> void:
 	status_msg = ""
 	match kind:
 		"register":
+			online_reregister_tries = 0
 			status_msg = "%s としてログインしました" % online.player_name
 			_refresh_status()
 			if menu_xp_label:
@@ -1542,20 +1576,18 @@ func _on_online_ok(kind: String, data: Dictionary) -> void:
 				online.join_room(c)
 			elif pending_daily:
 				online.fetch_daily()
+			elif screen == Screen.ONLINE:
+				status_msg = "部屋をつくる、またはコードを入力して参加します。"
+				_refresh_status()
 		"create_room", "join_room":
+			last_started_seed = 0
 			_apply_room_payload(data)
 			_show_room()
 		"ready", "start_room", "poll_room", "finish_room", "send_attack":
 			_apply_room_payload(data)
 			_ingest_attack_events(data)
 			if kind == "start_room" or (kind == "poll_room" and screen == Screen.ROOM):
-				var room: Dictionary = data.get("room", {})
-				if String(room.get("status", "")) == "playing" and screen == Screen.ROOM:
-					match_seed = int(room.get("seed", 0))
-					online_match = true
-					mode = _mode_from_str(String(room.get("mode", "sprint")))
-					last_event_id = 0
-					_begin_play()
+				_try_enter_online_match(data, kind == "start_room")
 			if kind == "finish_room":
 				_refresh_room_ui()
 				if screen == Screen.GAME_OVER:
@@ -1583,6 +1615,18 @@ func _on_online_ok(kind: String, data: Dictionary) -> void:
 	queue_redraw()
 
 func _on_online_fail(kind: String, message: String) -> void:
+	# Stale player ids after Render redeploy → re-register once and retry.
+	var unknown := message.to_lower().contains("unknown player")
+	if unknown and online and online_reregister_tries < 1 and (kind == "create_room" or kind == "join_room" or kind == "ready" or kind == "start_room" or kind == "finish_room"):
+		online_reregister_tries += 1
+		online.clear_player_id()
+		status_msg = "プレイヤーを再登録しています…"
+		_refresh_status()
+		if kind == "create_room" and pending_create_mode == "":
+			pending_create_mode = last_online_create_mode if last_online_create_mode != "" else "sprint"
+		online.register_player(online.ensure_display_name())
+		queue_redraw()
+		return
 	status_msg = message
 	_refresh_status()
 	if kind == "send_attack":
@@ -1604,8 +1648,48 @@ func _apply_room_payload(data: Dictionary) -> void:
 	is_host = String(room.get("hostId", "")) == online.player_id
 	room_players = room.get("players", [])
 	room_ranking = data.get("ranking", [])
+	room_status = String(room.get("status", room_status))
 	mode = _mode_from_str(String(room.get("mode", "sprint")))
 	_refresh_room_ui()
+
+func _local_player_finished(room: Dictionary) -> bool:
+	if online == null:
+		return false
+	for p in room.get("players", []):
+		if String(p.get("id", "")) == online.player_id:
+			return bool(p.get("finished", false))
+	return false
+
+func _try_enter_online_match(data: Dictionary, force_start: bool) -> void:
+	# Enter play only for a fresh match we haven't finished — never restart after game-over return.
+	if screen != Screen.ROOM:
+		return
+	var room: Dictionary = data.get("room", {})
+	if String(room.get("status", "")) != "playing":
+		return
+	if _local_player_finished(room):
+		return
+	var seed := int(room.get("seed", 0))
+	# Poll after returning mid-match must not relaunch the same seed.
+	if not force_start and seed != 0 and seed == last_started_seed:
+		return
+	match_seed = seed
+	last_started_seed = seed
+	online_match = true
+	mode = _mode_from_str(String(room.get("mode", "sprint")))
+	last_event_id = 0
+	_begin_play()
+
+func _forfeit_online() -> void:
+	if not online_match or online == null or screen != Screen.PLAY:
+		return
+	forfeit_armed = false
+	overlay.visible = false
+	var st := highest_stage if mode == Mode.ADVENTURE else 1
+	online.finish_room(score, lines, int(elapsed * 1000.0), st)
+	online_match = true # keep flag so game-over path still treats as online
+	_show_toast("棄権しました", 0.9)
+	_show_room()
 
 func _mode_from_str(s: String) -> Mode:
 	match s:
@@ -1647,13 +1731,22 @@ func _refresh_room_ui() -> void:
 	if room_info_label == null:
 		return
 	var code: String = online.room_code if online else "----"
-	var role := "あなたはホストです。全員そろったら「ゲーム開始」を押してください。" if is_host else "ホストが開始するまでお待ちください。"
-	room_info_label.text = "部屋コード：%s　／　モード：%s\n%s" % [code, _mode_label(mode), role]
+	var role := ""
+	match room_status:
+		"playing":
+			role = "試合進行中。終了した人は結果待ちです。ホストは全員終了後に次の試合を開始できます。"
+		"finished":
+			role = "試合終了。ホストが「ゲーム開始」で再戦できます。" if is_host else "試合終了。ホストの再戦開始を待っています。"
+		_:
+			role = "あなたはホストです。全員そろったら「ゲーム開始」を押してください。" if is_host else "ホストが開始するまでお待ちください。"
+	room_info_label.text = "部屋コード：%s　／　モード：%s\n状態：%s\n%s" % [code, _mode_label(mode), room_status, role]
 	var lines_txt := "参加者（%d人）\n" % room_players.size()
 	for p in room_players:
 		var state := "準備OK" if bool(p.get("ready", false)) else "準備中"
 		if bool(p.get("finished", false)):
 			state = "終了"
+		elif room_status == "playing":
+			state = "プレイ中"
 		lines_txt += "・%s … %s\n" % [String(p.get("name", "?")), state]
 	if not room_ranking.is_empty():
 		lines_txt += "\n順位\n"
@@ -2370,7 +2463,7 @@ func _build_room() -> void:
 	room_list_label = _body("", 15)
 	list.add_child(room_list_label)
 	col.add_child(_btn("準備OK", true, func(): if online: online.set_ready(true)))
-	col.add_child(_btn("ゲーム開始（ホストのみ）", true, func(): if online: online.start_room()))
+	col.add_child(_btn("ゲーム開始／再戦（ホスト）", true, _on_host_start_match))
 	col.add_child(_btn("部屋を出る", false, _on_back_menu))
 
 func _build_leaderboard() -> void:
@@ -2761,34 +2854,24 @@ func _restyle_tree(n: Node) -> void:
 func _apply_button_style(b: Button, primary: bool) -> void:
 	var warm := bool(b.get_meta("warm", false))
 	var pad_glass := bool(b.get_meta("pad", false))
-	var ac := _accent2() if warm else _accent()
-	var ac_cool := _accent()
-	var ac_warm := _accent2()
+	# One accent family per button — never mix teal fill with coral border.
+	var ac: Color = _accent2() if warm else _accent()
 	var normal := StyleBoxFlat.new()
 	if primary:
-		# Teal→coral punch: warm CTAs lean coral; cool primaries lean teal with coral edge.
-		if warm:
-			normal.bg_color = Color(
-				lerpf(0.10, ac_warm.r, 0.90),
-				lerpf(0.08, ac_warm.g, 0.90),
-				lerpf(0.12, ac_warm.b, 0.90),
-				0.98
-			)
-			normal.border_color = Color(ac_cool.r, ac_cool.g, ac_cool.b, 0.55)
-		else:
-			normal.bg_color = Color(
-				lerpf(0.06, ac_cool.r, 0.62),
-				lerpf(0.10, ac_cool.g, 0.62),
-				lerpf(0.16, ac_cool.b, 0.62),
-				0.98
-			)
-			normal.border_color = Color(ac_warm.r, ac_warm.g, ac_warm.b, 0.50)
+		var mix := 0.82 if warm else 0.58
+		normal.bg_color = Color(
+			lerpf(0.07, ac.r, mix),
+			lerpf(0.10, ac.g, mix),
+			lerpf(0.16, ac.b, mix),
+			0.97
+		)
+		normal.border_color = Color(ac.r, ac.g, ac.b, 0.42).lightened(0.08)
 	elif pad_glass:
 		normal.bg_color = Color(0.06, 0.10, 0.18, 0.78)
-		normal.border_color = Color(ac.r, ac.g, ac.b, 0.32)
+		normal.border_color = Color(ac.r, ac.g, ac.b, 0.28)
 	else:
 		normal.bg_color = Color(0.09, 0.12, 0.20, 0.92)
-		normal.border_color = Color(ac.r, ac.g, ac.b, 0.22)
+		normal.border_color = Color(1, 1, 1, 0.10)
 	normal.set_corner_radius_all(16 if not pad_glass else 14)
 	normal.content_margin_left = 12
 	normal.content_margin_right = 12
@@ -2797,12 +2880,12 @@ func _apply_button_style(b: Button, primary: bool) -> void:
 	normal.border_width_left = 1
 	normal.border_width_top = 1
 	normal.border_width_right = 1
-	normal.border_width_bottom = 3 if primary else 2
+	normal.border_width_bottom = 2
 	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = normal.bg_color.lightened(0.12)
-	hover.border_color = Color(ac.r, ac.g, ac.b, 0.55)
+	hover.bg_color = normal.bg_color.lightened(0.10)
+	hover.border_color = Color(ac.r, ac.g, ac.b, 0.50)
 	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = normal.bg_color.darkened(0.16)
+	pressed.bg_color = normal.bg_color.darkened(0.14)
 	pressed.border_width_bottom = 1
 	pressed.content_margin_top = 12
 	b.add_theme_stylebox_override("normal", normal)
@@ -2913,20 +2996,34 @@ func _on_save_profile() -> void:
 	status_msg = "保存しました"
 	_refresh_status()
 
+func _on_host_start_match() -> void:
+	_sfx("ui")
+	if online == null:
+		return
+	if not is_host:
+		status_msg = "ホストだけが開始できます"
+		_refresh_status()
+		return
+	if room_status == "playing":
+		status_msg = "試合進行中です。全員が終了してから再戦できます"
+		_refresh_status()
+		return
+	online.start_room()
+
 func _online_create(m: String) -> void:
 	_sfx("ui")
 	if online == null:
 		status_msg = "オンライン機能を読み込めませんでした"
 		_refresh_status()
 		return
-	if online.player_id == "":
-		pending_create_mode = m
-		status_msg = "接続中..."
-		_refresh_status()
-		var n := name_edit.text.strip_edges() if name_edit else ""
-		online.register_player(n if n != "" else online.ensure_display_name())
-		return
-	online.create_room(m)
+	# Always re-register first: Render free DB can wipe player ids on redeploy.
+	last_online_create_mode = m
+	pending_create_mode = m
+	online_reregister_tries = 0
+	status_msg = "接続中…（初回はサーバー起動に数十秒かかることがあります）"
+	_refresh_status()
+	var n := name_edit.text.strip_edges() if name_edit else ""
+	online.register_player(n if n != "" else online.ensure_display_name())
 
 func _online_join() -> void:
 	_sfx("ui")
@@ -2937,11 +3034,10 @@ func _online_join() -> void:
 		status_msg = "部屋コードを入力してください"
 		_refresh_status()
 		return
-	if online.player_id == "":
-		pending_join_code = code
-		online.register_player(online.player_name)
-		return
-	online.join_room(code)
+	pending_join_code = code
+	status_msg = "接続中…（初回はサーバー起動に数十秒かかることがあります）"
+	_refresh_status()
+	online.register_player(online.ensure_display_name())
 
 func _load_high_score() -> int:
 	if not FileAccess.file_exists(SAVE_PATH):

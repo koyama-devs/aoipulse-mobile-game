@@ -62,8 +62,12 @@ func _init() -> void:
 	ok = _assert(loot.size() == 3, "loot table") and ok
 
 	# Adventure online mode string + ranking comparator (stage > score > time).
-	var mode_map := {"classic": 0, "sprint": 1, "ultra": 2, "daily": 3, "adventure": 4}
+	var mode_map := {"classic": 0, "sprint": 1, "ultra": 2, "daily": 3, "adventure": 4, "norotate": 5}
 	ok = _assert(mode_map.has("adventure"), "mode adventure") and ok
+	ok = _assert(mode_map.has("norotate"), "mode norotate") and ok
+	# No-rotate: spawn orientation stays 0; rotate is a no-op by design.
+	var spawn_rot := 0
+	ok = _assert(spawn_rot == 0, "norotate spawn rot") and ok
 	var ranked: Array = [
 		{"n": "A", "stage": 5, "score": 1000, "timeMs": 90000},
 		{"n": "B", "stage": 7, "score": 500, "timeMs": 120000},
