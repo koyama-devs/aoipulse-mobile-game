@@ -11,10 +11,26 @@ const PORT = Number(process.env.PORT || 8787);
 const roomCode = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
 const idGen = customAlphabet("abcdefghijklmnopqrstuvwxyz0123456789", 16);
 
-const MODES = new Set(["classic", "sprint", "ultra", "daily", "adventure"]);
+const MODES = new Set(["classic", "sprint", "ultra", "daily", "adventure", "norotate"]);
+const ATTACK_TYPES = new Set(["garbage", "banana", "bomb"]);
+const ATTACK_COOLDOWN_MS = 6000;
+const ATTACK_MAX_PER_MATCH = 12;
+const EVENT_CAP = 40;
+const BOARD_KEYS = ["sprint", "ultra", "classic", "adventure", "norotate"];
 
 function emptyLeaderboards() {
-  return { daily: {}, sprint: [], ultra: [], classic: [], adventure: [] };
+  return { daily: {}, sprint: [], ultra: [], classic: [], adventure: [], norotate: [] };
+}
+
+function nextEventId(room) {
+  room.nextEventId = (room.nextEventId || 0) + 1;
+  return room.nextEventId;
+}
+
+function eventsSince(room, sinceId) {
+  const sid = Math.max(0, Number(sinceId) || 0);
+  const list = Array.isArray(room.events) ? room.events : [];
+  return list.filter((e) => (e.id || 0) > sid);
 }
 
 function loadDb() {
@@ -24,7 +40,7 @@ function loadDb() {
   try {
     const raw = JSON.parse(fs.readFileSync(DATA_PATH, "utf8"));
     raw.leaderboards = raw.leaderboards || {};
-    for (const k of ["sprint", "ultra", "classic", "adventure"]) {
+    for (const k of BOARD_KEYS) {
       if (!Array.isArray(raw.leaderboards[k])) raw.leaderboards[k] = [];
     }
     if (!raw.leaderboards.daily || typeof raw.leaderboards.daily !== "object") {
@@ -155,7 +171,7 @@ app.post("/api/rooms", (req, res) => {
   const player = db.players[playerId];
   if (!player) return res.status(400).json({ error: "Unknown player" });
   if (!MODES.has(mode) || mode === "daily") {
-    return res.status(400).json({ error: "Room mode must be classic, sprint, ultra, or adventure" });
+    return res.status(400).json({ error: "Room mode must be classic, sprint, ultra, adventure, or norotate" });
   }
   let code = roomCode();
   while (db.rooms[code]) code = roomCode();
@@ -214,21 +230,27 @@ app.post("/api/rooms/:code/start", (req, res) => {
   room.status = "playing";
   room.seed = (Math.random() * 0xffffffff) >>> 0;
   room.startedAt = Date.now();
+  room.events = [];
+  room.nextEventId = 0;
   for (const p of room.players) {
     p.finished = false;
     p.score = 0;
     p.lines = 0;
     p.timeMs = 0;
+    p.stage = 1;
     p.result = null;
+    p.lastAttackAt = 0;
+    p.attackUses = 0;
   }
   saveDb();
-  res.json({ room: publicRoom(room) });
+  res.json({ room: publicRoom(room), events: [] });
 });
 
 app.get("/api/rooms/:code", (req, res) => {
   const code = String(req.params.code || "").toUpperCase();
   const room = db.rooms[code];
   if (!room) return res.status(404).json({ error: "Room not found" });
+  const since = req.query?.since;
   const ranked = rankRoomPlayers(room).map((p, i) => ({
     rank: i + 1,
     id: p.id,
@@ -238,7 +260,63 @@ app.get("/api/rooms/:code", (req, res) => {
     timeMs: p.timeMs || 0,
     stage: p.stage || 1,
   }));
-  res.json({ room: publicRoom(room), ranking: ranked });
+  res.json({
+    room: publicRoom(room),
+    ranking: ranked,
+    events: eventsSince(room, since),
+  });
+});
+
+app.post("/api/rooms/:code/attack", (req, res) => {
+  const code = String(req.params.code || "").toUpperCase();
+  const playerId = String(req.body?.playerId || "");
+  const type = String(req.body?.type || "");
+  const room = db.rooms[code];
+  if (!room) return res.status(404).json({ error: "Room not found" });
+  if (room.mode !== "adventure") return res.status(400).json({ error: "Attacks only in adventure rooms" });
+  if (room.status !== "playing") return res.status(400).json({ error: "Match not playing" });
+  if (!ATTACK_TYPES.has(type)) return res.status(400).json({ error: "Invalid attack type" });
+  const p = room.players.find((x) => x.id === playerId);
+  if (!p) return res.status(400).json({ error: "Not in room" });
+  if (p.finished) return res.status(400).json({ error: "Already finished" });
+
+  const now = Date.now();
+  const uses = p.attackUses || 0;
+  if (uses >= ATTACK_MAX_PER_MATCH) {
+    return res.status(400).json({ error: "Attack limit reached" });
+  }
+  if ((p.lastAttackAt || 0) + ATTACK_COOLDOWN_MS > now) {
+    return res.status(400).json({ error: "Attack cooldown" });
+  }
+
+  const targets = room.players.filter((x) => x.id !== playerId && !x.finished);
+  if (targets.length === 0) {
+    return res.status(400).json({ error: "No opponents" });
+  }
+
+  if (!Array.isArray(room.events)) room.events = [];
+  const ev = {
+    id: nextEventId(room),
+    fromId: playerId,
+    fromName: p.name,
+    type,
+    at: now,
+  };
+  room.events.push(ev);
+  if (room.events.length > EVENT_CAP) {
+    room.events = room.events.slice(-EVENT_CAP);
+  }
+  p.lastAttackAt = now;
+  p.attackUses = uses + 1;
+  saveDb();
+
+  res.json({
+    room: publicRoom(room),
+    event: ev,
+    events: eventsSince(room, Math.max(0, ev.id - 1)),
+    attackUses: p.attackUses,
+    cooldownMs: ATTACK_COOLDOWN_MS,
+  });
 });
 
 app.post("/api/rooms/:code/finish", (req, res) => {

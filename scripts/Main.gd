@@ -3,8 +3,11 @@ extends Control
 
 const COLS := 10
 const ROWS := 20
-## Buttons in the bottom touch pad, including the adventure-only item slot.
-const PAD_COUNT := 7
+## Max pad slots (includes adventure item + online attack).
+const PAD_COUNT := 8
+const ATTACK_TYPES := ["garbage", "banana", "bomb"]
+const ATTACK_LABELS := {"garbage": "ゴミ", "banana": "バナナ", "bomb": "ボム"}
+const ATTACK_COOLDOWN := 6.0
 ## Menu pages keep their content this narrow and centred, so buttons do not
 ## stretch edge to edge behind a couple of short kanji.
 const CONTENT_MAX_W := 380.0
@@ -23,11 +26,11 @@ const PIECES := [
 ]
 
 const THEMES := [
-	# Aoitex house colours: navy base, teal primary, coral-orange secondary.
+	# Aoitex house colours: deep navy, bright teal, punchy coral.
 	{"name": "Aoitex", "jp": "アオイテックス",
-	 "bg": Color(0.043, 0.078, 0.137), "bg2": Color(0.106, 0.173, 0.275), "panel": Color(0.086, 0.145, 0.235),
-	 "accent": Color(0.22, 0.74, 0.87), "accent2": Color(0.97, 0.45, 0.34),
-	 "colors": [Color(0.20, 0.80, 0.90), Color(0.98, 0.75, 0.25), Color(0.96, 0.40, 0.36), Color(0.33, 0.83, 0.58), Color(0.66, 0.45, 0.92), Color(0.30, 0.52, 0.92), Color(1.00, 0.55, 0.20)]},
+	 "bg": Color(0.02, 0.045, 0.09), "bg2": Color(0.07, 0.13, 0.24), "panel": Color(0.06, 0.11, 0.20),
+	 "accent": Color(0.28, 0.86, 0.96), "accent2": Color(1.0, 0.48, 0.32),
+	 "colors": [Color(0.22, 0.88, 0.96), Color(1.0, 0.82, 0.28), Color(1.0, 0.42, 0.38), Color(0.36, 0.90, 0.62), Color(0.72, 0.48, 0.96), Color(0.34, 0.58, 0.98), Color(1.0, 0.58, 0.22)]},
 	{"name": "Neon", "jp": "ネオン",
 	 "bg": Color(0.04, 0.05, 0.09), "bg2": Color(0.07, 0.10, 0.18), "panel": Color(0.09, 0.12, 0.20),
 	 "accent": Color(0.25, 0.88, 0.95), "accent2": Color(0.35, 0.55, 1.0),
@@ -64,7 +67,7 @@ const ITEM_LINE := "line"
 const ITEM_SLOW := "slow"
 
 enum Screen { MENU, MODE, SETTINGS, HOWTO, ONLINE, ROOM, LEADERBOARD, PLAY, GAME_OVER }
-enum Mode { CLASSIC, SPRINT, ULTRA, DAILY, ADVENTURE }
+enum Mode { CLASSIC, SPRINT, ULTRA, DAILY, ADVENTURE, NO_ROTATE }
 
 var screen: Screen = Screen.MENU
 var mode: Mode = Mode.CLASSIC
@@ -80,6 +83,7 @@ var score := 0
 var level := 1
 var lines := 0
 var high_score := 0
+var high_norotate := 0
 var paused := false
 var fall_timer := 0.0
 var fall_interval := 1.0
@@ -112,6 +116,7 @@ var combo := 0
 var toast_text := ""
 var toast_timer := 0.0
 var title_pulse := 0.0
+var toast_punch := 0.0
 var menu_blocks: Array = []
 var shake_time := 0.0
 var shake_mag := 0.0
@@ -151,6 +156,12 @@ var stage_banner := ""
 var stage_banner_timer := 0.0
 var event_warn := ""
 var event_warn_timer := 0.0
+var attack_charges := 0
+var attack_cooldown := 0.0
+var attack_type_idx := 0
+var last_event_id := 0
+var pending_bananas := 0
+var play_poll := 0.0
 
 var sfx_on := true
 var music_on := true
@@ -166,6 +177,8 @@ var timer_label: Label
 var adventure_label: Label
 var pause_btn: Button
 var item_btn: Button
+var attack_btn: Button
+var rot_btn: Button
 var pad_root: Control
 var pad_buttons: Array[Button] = []
 var screen_margins: Array[MarginContainer] = []
@@ -213,11 +226,155 @@ func _mode_label(m: Mode) -> String:
 			return "ウルトラ"
 		Mode.ADVENTURE:
 			return "アドベンチャー"
+		Mode.NO_ROTATE:
+			return "回転なし"
 		_:
 			return "デイリー"
 
+func _is_no_rotate() -> bool:
+	return mode == Mode.NO_ROTATE
+
+func _current_high_score() -> int:
+	return high_norotate if _is_no_rotate() else high_score
+
 func _is_adventure() -> bool:
 	return mode == Mode.ADVENTURE
+
+func _pvp_attacks_enabled() -> bool:
+	return online_match and mode == Mode.ADVENTURE
+
+func _current_attack_type() -> String:
+	return ATTACK_TYPES[clampi(attack_type_idx, 0, ATTACK_TYPES.size() - 1)]
+
+func _attack_type_label(t: String) -> String:
+	return String(ATTACK_LABELS.get(t, t))
+
+func _gain_attack_charge(reason: String = "") -> void:
+	if not _pvp_attacks_enabled():
+		return
+	if attack_charges >= 3:
+		return
+	attack_charges += 1
+	_show_toast("攻撃チャージ +1" + (("（%s）" % reason) if reason != "" else ""), 0.85)
+	_refresh_attack_btn()
+	_refresh_labels()
+
+func _cycle_attack_type() -> void:
+	attack_type_idx = (attack_type_idx + 1) % ATTACK_TYPES.size()
+	_show_toast("攻撃：%s" % _attack_type_label(_current_attack_type()), 0.55)
+	_refresh_attack_btn()
+
+func _on_attack_btn() -> void:
+	if not _pvp_attacks_enabled() or screen != Screen.PLAY or paused or countdown > 0.0:
+		return
+	if attack_charges <= 0:
+		_cycle_attack_type()
+		_show_toast("チャージがありません（タップで種類切替）", 0.7)
+		return
+	if attack_cooldown > 0.0:
+		_show_toast("クールダウン中…", 0.55)
+		return
+	if online == null or online.player_id == "":
+		return
+	var t := _current_attack_type()
+	attack_charges = maxi(0, attack_charges - 1)
+	attack_cooldown = ATTACK_COOLDOWN
+	_refresh_attack_btn()
+	_refresh_labels()
+	_show_toast("%sを送信！" % _attack_type_label(t), 0.7)
+	_sfx("ui")
+	online.send_attack(t)
+
+func _ingest_attack_events(data: Dictionary) -> void:
+	var events = data.get("events", [])
+	if typeof(events) != TYPE_ARRAY:
+		return
+	for e in events:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var eid := int(e.get("id", 0))
+		if eid <= last_event_id:
+			continue
+		last_event_id = maxi(last_event_id, eid)
+		var from_id := String(e.get("fromId", ""))
+		if from_id == "" or (online and from_id == online.player_id):
+			continue
+		if screen != Screen.PLAY:
+			continue
+		_apply_incoming_attack(String(e.get("type", "")), String(e.get("fromName", "?")))
+
+func _apply_incoming_attack(type: String, from_name: String) -> void:
+	match type:
+		"garbage":
+			if shield_charges > 0:
+				shield_charges -= 1
+				_show_toast("%sのゴミを盾で防いだ！" % from_name, 1.0)
+				_sfx("loot" if ResourceLoader.exists("res://assets/audio/loot.wav") else "ui")
+			else:
+				_add_garbage_row(1)
+				_show_toast("%sからゴミ！" % from_name, 1.0)
+				_sfx("warn" if ResourceLoader.exists("res://assets/audio/warn.wav") else "ui")
+				_haptic(45)
+		"banana":
+			if clearing or countdown > 0.0 or paused:
+				pending_bananas += 1
+				_show_toast("%sからバナナ！（まもなく）" % from_name, 0.9)
+			else:
+				_apply_banana_effect()
+				_show_toast("%sからバナナ！" % from_name, 1.0)
+		"bomb":
+			_plant_incoming_bomb()
+			_show_toast("%sからボム設置！" % from_name, 1.0)
+			_sfx("bomb" if ResourceLoader.exists("res://assets/audio/bomb.wav") else "warn")
+			_haptic(40)
+		_:
+			return
+	_refresh_labels()
+	queue_redraw()
+
+func _apply_banana_effect() -> void:
+	# Randomize active piece rotation to a valid orientation.
+	var start := cur_rot
+	var order: Array = [0, 1, 2, 3]
+	order.shuffle()
+	for r in order:
+		var rr := int(r)
+		if rr == start:
+			continue
+		if _is_valid(cur_type, rr, cur_pos):
+			cur_rot = rr
+			_sfx("rotate")
+			return
+	# Kick left/right if pure rotate fails.
+	for r in order:
+		var rr := int(r)
+		for dx in [0, -1, 1, -2, 2]:
+			var np := cur_pos + Vector2i(dx, 0)
+			if _is_valid(cur_type, rr, np):
+				cur_rot = rr
+				cur_pos = np
+				_sfx("rotate")
+				return
+
+func _plant_incoming_bomb() -> void:
+	var cells: Array = []
+	for y in ROWS:
+		for x in COLS:
+			if grid[y][x] != -1 and int(meta[y][x]) == META_NONE:
+				cells.append(Vector2i(x, y))
+	if cells.is_empty():
+		_add_garbage_row(1)
+		# Plant on a garbage cell in the new bottom row if possible.
+		var y := ROWS - 1
+		for x in COLS:
+			if grid[y][x] != -1:
+				meta[y][x] = META_BOMB
+				bomb_timer[y][x] = 5
+				return
+		return
+	var pick: Vector2i = cells[rng.randi_range(0, cells.size() - 1)]
+	meta[pick.y][pick.x] = META_BOMB
+	bomb_timer[pick.y][pick.x] = 5
 
 func _font() -> Font:
 	return ui_font if ui_font != null else ThemeDB.fallback_font
@@ -241,6 +398,7 @@ func _ready() -> void:
 	rng.randomize()
 	_load_settings()
 	high_score = _load_high_score()
+	high_norotate = _load_norotate_high()
 	_setup_audio()
 	_init_menu_blocks()
 	_build_ui()
@@ -252,15 +410,15 @@ func _ready() -> void:
 
 func _init_menu_blocks() -> void:
 	menu_blocks.clear()
-	for i in 8:
+	for i in 10:
 		menu_blocks.append({
-			"pos": Vector2(rng.randf_range(0.08, 0.92), rng.randf_range(0.08, 0.92)),
+			"pos": Vector2(rng.randf_range(0.06, 0.94), rng.randf_range(0.05, 0.95)),
 			"type": rng.randi_range(0, 6),
 			"rot": rng.randi_range(0, 3),
-			"speed": rng.randf_range(4.0, 14.0),
+			"speed": rng.randf_range(5.0, 16.0),
 			"phase": rng.randf_range(0.0, TAU),
-			"size": rng.randf_range(10.0, 16.0),
-			"drift": rng.randf_range(10.0, 28.0),
+			"size": rng.randf_range(14.0, 22.0),
+			"drift": rng.randf_range(14.0, 36.0),
 		})
 
 # ---------------------------------------------------------------------------
@@ -379,8 +537,12 @@ func _begin_play() -> void:
 	countdown = 3.0 if online_match else 0.0
 	_reset_game()
 	_refresh_item_btn()
+	_refresh_attack_btn()
 	if item_btn:
 		item_btn.visible = _is_adventure()
+	if attack_btn:
+		attack_btn.visible = _pvp_attacks_enabled()
+	_refresh_rotate_btn()
 	_play_music(true)
 
 func _show_game_over(victory: bool = false) -> void:
@@ -394,9 +556,12 @@ func _show_game_over(victory: bool = false) -> void:
 		title = "タイムアップ"
 	overlay_title.text = title
 	var time_txt := _fmt_time(int(elapsed * 1000.0))
-	overlay_sub.text = "スコア %d　／　ライン %d　／　タイム %s\n最高スコア %d\n\n画面をタップしてもどる" % [score, lines, time_txt, high_score]
+	var best := _current_high_score()
+	overlay_sub.text = "スコア %d　／　ライン %d　／　タイム %s\n最高スコア %d\n\n画面をタップしてもどる" % [score, lines, time_txt, best]
 	if mode == Mode.ADVENTURE:
 		overlay_sub.text = "スコア %d　／　到達ステージ %d\nボム解除 %d　／　宝箱 %d\n最高スコア %d\n\n画面をタップしてもどる" % [score, highest_stage, bombs_defused, chests_opened, high_score]
+	elif _is_no_rotate():
+		overlay_sub.text = "回転なし　／　スコア %d　／　ライン %d\n最高スコア %d\n\n画面をタップしてもどる" % [score, lines, best]
 	if online_match:
 		overlay_sub.text += "\n結果を送信中..."
 	elif mode == Mode.DAILY and online and online.player_id != "":
@@ -404,9 +569,7 @@ func _show_game_over(victory: bool = false) -> void:
 		online.submit_daily(score, lines, int(elapsed * 1000.0), match_seed)
 	overlay.visible = true
 	_sfx("gameover")
-	if score > high_score:
-		high_score = score
-		_save_high_score(high_score)
+	_commit_run_high_score()
 	if online_match and online:
 		var st := highest_stage if mode == Mode.ADVENTURE else 1
 		online.finish_room(score, lines, int(elapsed * 1000.0), st)
@@ -474,6 +637,12 @@ func _reset_game() -> void:
 	stage_banner_timer = 0.0
 	event_warn = ""
 	event_warn_timer = 0.0
+	attack_charges = 0
+	attack_cooldown = 0.0
+	attack_type_idx = 0
+	last_event_id = 0
+	pending_bananas = 0
+	play_poll = 0.0
 	_update_fall_interval()
 	next_type = _next_from_bag()
 	_spawn_piece()
@@ -481,6 +650,7 @@ func _reset_game() -> void:
 		_begin_stage(1, true)
 	_refresh_labels()
 	_refresh_item_btn()
+	_refresh_attack_btn()
 	pause_btn.text = "II"
 	pause_btn.modulate = Color.WHITE
 	_apply_button_style(pause_btn, false)
@@ -555,13 +725,15 @@ func _spawn_piece() -> void:
 	hold_used = false
 	if not _is_valid(cur_type, cur_rot, cur_pos):
 		_end_run(false)
+		return
+	if pending_bananas > 0:
+		pending_bananas -= 1
+		_apply_banana_effect()
 
 func _end_run(victory: bool) -> void:
 	if screen == Screen.GAME_OVER:
 		return
-	if score > high_score:
-		high_score = score
-		_save_high_score(high_score)
+	_commit_run_high_score()
 	_show_game_over(victory)
 
 func _next_from_bag() -> int:
@@ -619,6 +791,9 @@ func _try_move(delta: Vector2i) -> bool:
 
 func _rotate(dir: int) -> void:
 	if screen != Screen.PLAY or paused or clearing or countdown > 0.0:
+		return
+	if _is_no_rotate():
+		_show_toast("このモードでは回転できません", 0.7)
 		return
 	var nr := (cur_rot + dir + 4) % 4
 	for kick in [Vector2i(0, 0), Vector2i(-1, 0), Vector2i(1, 0), Vector2i(-2, 0), Vector2i(2, 0), Vector2i(0, -1)]:
@@ -868,6 +1043,8 @@ func _finish_clear() -> void:
 				_grant_chest_loot()
 		stage_line_count += cleared
 		_adventure_progress_stage()
+		if _pvp_attacks_enabled() and cleared >= 2:
+			_gain_attack_charge("%dライン" % cleared)
 	_update_fall_interval()
 	if bombs_in_clear == 0 and chests_in_clear == 0:
 		if combo > 1:
@@ -924,6 +1101,8 @@ func _grant_chest_loot() -> void:
 	if rng.randf() < 0.35:
 		shield_charges = mini(2, shield_charges + 1)
 		_show_toast("盾を入手！　おじゃまを1回自動で防ぐ", 1.0)
+	if _pvp_attacks_enabled() and rng.randf() < 0.35:
+		_gain_attack_charge("宝箱")
 	_sfx("loot" if ResourceLoader.exists("res://assets/audio/loot.wav") else "ui")
 	_refresh_item_btn()
 
@@ -1026,6 +1205,7 @@ func _item_clear_lowest() -> void:
 
 func _show_toast(text: String, dur: float = 0.9) -> void:
 	toast_text = text
+	toast_punch = 0.28
 	toast_timer = dur
 
 func _update_fall_interval() -> void:
@@ -1041,15 +1221,32 @@ func _shake(t: float, mag: float) -> void:
 	shake_mag = mag
 
 func _spawn_clear_particles(rows: Array) -> void:
+	var n := rows.size()
+	var burst := 1 if n <= 1 else (2 if n <= 3 else 3)
+	var speed_boost := 1.0 + (n - 1) * 0.22
 	for y in rows:
 		for x in COLS:
 			var cidx: int = int(grid[y][x]) if grid[y][x] != -1 else rng.randi_range(0, 6)
+			var base_col: Color = _colors()[cidx]
+			for _k in burst:
+				var col := base_col.lightened(rng.randf_range(0.0, 0.25))
+				particles.append({
+					"pos": board_origin + Vector2((x + 0.5) * cell, (y + 0.5) * cell),
+					"vel": Vector2(rng.randf_range(-140, 140) * speed_boost, rng.randf_range(-280, -60) * speed_boost),
+					"life": rng.randf_range(0.32, 0.75 + n * 0.06),
+					"color": col,
+					"size": rng.randf_range(3.0, 6.5 + n * 0.8),
+				})
+	# Extra teal/coral sparks on Tetris / big clears.
+	if n >= 3:
+		var ac := _accent() if n < 4 else _accent2()
+		for i in (10 if n >= 4 else 6):
 			particles.append({
-				"pos": board_origin + Vector2((x + 0.5) * cell, (y + 0.5) * cell),
-				"vel": Vector2(rng.randf_range(-120, 120), rng.randf_range(-220, -40)),
-				"life": rng.randf_range(0.35, 0.7),
-				"color": _colors()[cidx],
-				"size": rng.randf_range(3.0, 7.0),
+				"pos": board_origin + Vector2(cell * COLS * 0.5, cell * float(rows[0])),
+				"vel": Vector2(rng.randf_range(-220, 220), rng.randf_range(-320, -80)),
+				"life": rng.randf_range(0.4, 0.85),
+				"color": Color(ac.r, ac.g, ac.b, 1.0),
+				"size": rng.randf_range(4.0, 9.0),
 			})
 
 func _fmt_time(ms: int) -> String:
@@ -1066,11 +1263,25 @@ func _process(delta: float) -> void:
 	title_pulse += delta
 	if paused and pause_btn and pause_btn.visible:
 		pause_btn.modulate = Color.WHITE.lerp(Color(1.6, 1.7, 1.9), 0.5 + 0.5 * sin(title_pulse * 5.0))
+	if screen == Screen.MENU:
+		var bp := 1.0 + 0.035 * sin(title_pulse * 2.4)
+		if brand_cool:
+			brand_cool.scale = Vector2(bp, bp)
+			brand_cool.pivot_offset = brand_cool.size * 0.5
+		if brand_warm:
+			brand_warm.scale = Vector2(bp, bp)
+			brand_warm.pivot_offset = brand_warm.size * 0.5
+	elif brand_cool:
+		brand_cool.scale = Vector2.ONE
+		if brand_warm:
+			brand_warm.scale = Vector2.ONE
 	if panel_fade < 1.0:
 		panel_fade = minf(1.0, panel_fade + delta * 4.5)
 		_apply_panel_fade()
 	if toast_timer > 0.0:
 		toast_timer = maxf(0.0, toast_timer - delta)
+	if toast_punch > 0.0:
+		toast_punch = maxf(0.0, toast_punch - delta)
 	if stage_banner_timer > 0.0:
 		stage_banner_timer = maxf(0.0, stage_banner_timer - delta)
 	if event_warn_timer > 0.0:
@@ -1093,11 +1304,20 @@ func _process(delta: float) -> void:
 		clear_flash = maxf(0.0, clear_flash - delta)
 		if clearing and clear_flash <= 0.0:
 			_finish_clear()
+	if attack_cooldown > 0.0:
+		attack_cooldown = maxf(0.0, attack_cooldown - delta)
+		if attack_cooldown <= 0.0:
+			_refresh_attack_btn()
 	if screen == Screen.ROOM and online:
 		room_poll -= delta
 		if room_poll <= 0.0:
 			room_poll = 1.2
-			online.poll_room()
+			online.poll_room(last_event_id)
+	if screen == Screen.PLAY and online_match and online and not paused:
+		play_poll -= delta
+		if play_poll <= 0.0:
+			play_poll = 0.8
+			online.poll_room(last_event_id)
 	if screen == Screen.MENU or screen == Screen.MODE or screen == Screen.SETTINGS or screen == Screen.HOWTO or screen == Screen.ONLINE or screen == Screen.ROOM or screen == Screen.LEADERBOARD:
 		for b in menu_blocks:
 			b["phase"] = float(b["phase"]) + delta
@@ -1325,14 +1545,16 @@ func _on_online_ok(kind: String, data: Dictionary) -> void:
 		"create_room", "join_room":
 			_apply_room_payload(data)
 			_show_room()
-		"ready", "start_room", "poll_room", "finish_room":
+		"ready", "start_room", "poll_room", "finish_room", "send_attack":
 			_apply_room_payload(data)
+			_ingest_attack_events(data)
 			if kind == "start_room" or (kind == "poll_room" and screen == Screen.ROOM):
 				var room: Dictionary = data.get("room", {})
 				if String(room.get("status", "")) == "playing" and screen == Screen.ROOM:
 					match_seed = int(room.get("seed", 0))
 					online_match = true
 					mode = _mode_from_str(String(room.get("mode", "sprint")))
+					last_event_id = 0
 					_begin_play()
 			if kind == "finish_room":
 				_refresh_room_ui()
@@ -1341,6 +1563,8 @@ func _on_online_ok(kind: String, data: Dictionary) -> void:
 						overlay_sub.text = "ステージ %d　／　スコア %d を送信しました。\n画面をタップして順位を見る。" % [highest_stage, score]
 					else:
 						overlay_sub.text = "スコア %d を送信しました。\n画面をタップして順位を見る。" % score
+			if kind == "send_attack":
+				_refresh_attack_btn()
 		"leaderboard":
 			leaderboard_entries = data.get("entries", [])
 			_refresh_lb_ui(String(data.get("board", "daily")), String(data.get("day", "")))
@@ -1361,6 +1585,13 @@ func _on_online_ok(kind: String, data: Dictionary) -> void:
 func _on_online_fail(kind: String, message: String) -> void:
 	status_msg = message
 	_refresh_status()
+	if kind == "send_attack":
+		# Refund charge if server rejected the throw.
+		attack_charges = mini(3, attack_charges + 1)
+		attack_cooldown = 0.0
+		_show_toast(message, 0.85)
+		_refresh_attack_btn()
+		_refresh_labels()
 	if screen == Screen.GAME_OVER:
 		overlay_sub.text += "\n(%s)" % message
 	queue_redraw()
@@ -1386,6 +1617,8 @@ func _mode_from_str(s: String) -> Mode:
 			return Mode.DAILY
 		"adventure":
 			return Mode.ADVENTURE
+		"norotate":
+			return Mode.NO_ROTATE
 		_:
 			return Mode.SPRINT
 
@@ -1399,6 +1632,8 @@ func _mode_str(m: Mode) -> String:
 			return "daily"
 		Mode.ADVENTURE:
 			return "adventure"
+		Mode.NO_ROTATE:
+			return "norotate"
 		_:
 			return "sprint"
 
@@ -1446,6 +1681,8 @@ func _board_label(board: String) -> String:
 			return "クラシック"
 		"adventure":
 			return "アドベンチャー（到達ステージ）"
+		"norotate":
+			return "回転なし（スコア）"
 		_:
 			return "デイリーチャレンジ"
 
@@ -1552,12 +1789,16 @@ func _draw() -> void:
 				_draw_meta_overlay(origin, Vector2i(x, y))
 	if clear_flash > 0.0:
 		var a := clear_flash / 0.32
-		draw_rect(Rect2(origin, Vector2(board_w, board_h)), Color(1, 1, 1, 0.12 * a), true)
+		var big := clear_rows.size() >= 4
+		var dim := Color(0.02, 0.04, 0.08, 0.22 * a)
+		draw_rect(Rect2(origin, Vector2(board_w, board_h)), dim, true)
+		draw_rect(Rect2(origin, Vector2(board_w, board_h)), Color(1, 1, 1, (0.10 if big else 0.06) * a), true)
 		for ry in clear_rows:
 			var yy := clampi(int(ry), 0, ROWS - 1)
-			var flash := Color(th["accent"].r, th["accent"].g, th["accent"].b, 0.65 * a)
+			var flash_col: Color = th["accent2"] if big else th["accent"]
+			var flash := Color(flash_col.r, flash_col.g, flash_col.b, (0.78 if big else 0.62) * a)
 			draw_rect(Rect2(origin + Vector2(0, yy * cell), Vector2(board_w, cell)), flash, true)
-			draw_rect(Rect2(origin + Vector2(0, yy * cell), Vector2(board_w, cell)), Color(1, 1, 1, 0.35 * a), false, 2.0)
+			draw_rect(Rect2(origin + Vector2(0, yy * cell), Vector2(board_w, cell)), Color(1, 1, 1, 0.4 * a), false, 2.2)
 	if screen == Screen.PLAY and not paused and not clearing and countdown <= 0.0:
 		var gp := _ghost_pos()
 		for c in _cells(cur_type, cur_rot, gp):
@@ -1688,70 +1929,75 @@ func _draw_stage_banner(size: Vector2) -> void:
 
 func _draw_background(size: Vector2, th: Dictionary) -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), th["bg"], true)
-	# Soft vertical gradient via stacked bands.
-	for i in 12:
-		var t := float(i) / 11.0
-		var c: Color = th["bg"].lerp(th["bg2"], t)
-		c.a = 0.55
-		var y := size.y * t
-		draw_rect(Rect2(0, y, size.x, size.y / 11.0 + 2.0), c, true)
-	# Cool wash fading down from the top, warm wash fading up from the bottom.
-	# Both are drawn as fading bands so they never leave a visible hard edge.
-	var cool: Color = th["accent"]
-	var warm: Color = th["accent2"]
-	var band := size.y * 0.34
 	for i in 14:
 		var t := float(i) / 13.0
+		var c: Color = th["bg"].lerp(th["bg2"], t)
+		c.a = 0.62
+		var y := size.y * t
+		draw_rect(Rect2(0, y, size.x, size.y / 13.0 + 2.0), c, true)
+	var cool: Color = th["accent"]
+	var warm: Color = th["accent2"]
+	var band := size.y * 0.38
+	for i in 16:
+		var t := float(i) / 15.0
 		var fade := (1.0 - t) * (1.0 - t)
-		draw_rect(Rect2(0, band * t, size.x, band / 13.0 + 2.0), Color(cool.r, cool.g, cool.b, 0.055 * fade), true)
-		draw_rect(Rect2(0, size.y - band * t - band / 13.0 - 2.0, size.x, band / 13.0 + 2.0), Color(warm.r, warm.g, warm.b, 0.05 * fade), true)
-	# Vignette corners.
-	var vig := Color(0, 0, 0, 0.28)
-	draw_rect(Rect2(0, 0, size.x, 18), vig, true)
-	draw_rect(Rect2(0, size.y - 28, size.x, 28), Color(0, 0, 0, 0.35), true)
+		draw_rect(Rect2(0, band * t, size.x, band / 15.0 + 2.0), Color(cool.r, cool.g, cool.b, 0.07 * fade), true)
+		draw_rect(Rect2(0, size.y - band * t - band / 15.0 - 2.0, size.x, band / 15.0 + 2.0), Color(warm.r, warm.g, warm.b, 0.065 * fade), true)
+	# Soft vignette bands.
+	draw_rect(Rect2(0, 0, size.x, 28), Color(0, 0, 0, 0.38), true)
+	draw_rect(Rect2(0, size.y - 40, size.x, 40), Color(0, 0, 0, 0.42), true)
+	draw_rect(Rect2(0, 0, 18, size.y), Color(0, 0, 0, 0.22), true)
+	draw_rect(Rect2(size.x - 18, 0, 18, size.y), Color(0, 0, 0, 0.22), true)
 
 func _draw_board_frame(origin: Vector2, board_w: float, board_h: float, th: Dictionary) -> void:
-	var pad := 10.0
+	var pad := 12.0
 	var outer := Rect2(origin - Vector2(pad, pad), Vector2(board_w + pad * 2, board_h + pad * 2))
-	# Soft outer glow.
-	var glow := Color(th["accent"].r, th["accent"].g, th["accent"].b, 0.12)
-	draw_rect(outer.grow(6), glow, true)
-	# Frame shell.
-	draw_rect(outer, th["panel"], true)
-	draw_rect(outer, Color(th["accent"].r, th["accent"].g, th["accent"].b, 0.35), false, 2.0)
-	# Inner well.
-	draw_rect(Rect2(origin, Vector2(board_w, board_h)), Color(0.02, 0.03, 0.05, 0.85), true)
-	# Subtle grid.
-	for x in range(COLS + 1):
-		draw_line(origin + Vector2(x * cell, 0), origin + Vector2(x * cell, board_h), Color(1, 1, 1, 0.04), 1.0)
-	for y in range(ROWS + 1):
-		draw_line(origin + Vector2(0, y * cell), origin + Vector2(board_w, y * cell), Color(1, 1, 1, 0.04), 1.0)
-	# Danger zone hint near top, underlined in the warm accent.
+	var ac: Color = th["accent"]
 	var ac2: Color = th["accent2"]
-	draw_rect(Rect2(origin, Vector2(board_w, cell * 2)), Color(ac2.r, ac2.g, ac2.b, 0.04), true)
-	draw_line(origin + Vector2(0, cell * 2), origin + Vector2(board_w, cell * 2), Color(ac2.r, ac2.g, ac2.b, 0.28), 1.0)
-	# Warm corner brackets so the frame is not a single flat colour.
-	var brk := minf(26.0, board_w * 0.12)
-	var warm := Color(ac2.r, ac2.g, ac2.b, 0.75)
+	# Layered outer glow.
+	draw_rect(outer.grow(10), Color(ac.r, ac.g, ac.b, 0.07), true)
+	draw_rect(outer.grow(5), Color(ac.r, ac.g, ac.b, 0.14), true)
+	# Frame shell with depth.
+	draw_rect(outer, th["panel"], true)
+	draw_rect(outer, Color(ac.r, ac.g, ac.b, 0.55), false, 2.4)
+	draw_rect(outer.grow(-3), Color(ac2.r, ac2.g, ac2.b, 0.22), false, 1.2)
+	# Inner well — near black for stack readability (TETR.IO-style).
+	draw_rect(Rect2(origin, Vector2(board_w, board_h)), Color(0.015, 0.02, 0.035, 0.94), true)
+	# Very light scan bands.
+	for i in 5:
+		var sy := origin.y + board_h * (0.12 + i * 0.18)
+		draw_rect(Rect2(origin.x, sy, board_w, 1.0), Color(1, 1, 1, 0.025), true)
+	# Grid ~4%.
+	for x in range(COLS + 1):
+		draw_line(origin + Vector2(x * cell, 0), origin + Vector2(x * cell, board_h), Color(1, 1, 1, 0.045), 1.0)
+	for y in range(ROWS + 1):
+		draw_line(origin + Vector2(0, y * cell), origin + Vector2(board_w, y * cell), Color(1, 1, 1, 0.045), 1.0)
+	# Danger zone — clearer coral wash + line.
+	draw_rect(Rect2(origin, Vector2(board_w, cell * 2)), Color(ac2.r, ac2.g, ac2.b, 0.08), true)
+	draw_line(origin + Vector2(0, cell * 2), origin + Vector2(board_w, cell * 2), Color(ac2.r, ac2.g, ac2.b, 0.55), 2.0)
+	# Corner brackets.
+	var brk := minf(30.0, board_w * 0.14)
+	var warm := Color(ac2.r, ac2.g, ac2.b, 0.9)
 	for corner in [Vector2(outer.position.x, outer.position.y), Vector2(outer.end.x, outer.position.y), Vector2(outer.position.x, outer.end.y), Vector2(outer.end.x, outer.end.y)]:
 		var sx := 1.0 if corner.x == outer.position.x else -1.0
 		var sy := 1.0 if corner.y == outer.position.y else -1.0
-		draw_line(corner, corner + Vector2(brk * sx, 0), warm, 2.5)
-		draw_line(corner, corner + Vector2(0, brk * sy), warm, 2.5)
+		draw_line(corner, corner + Vector2(brk * sx, 0), warm, 3.0)
+		draw_line(corner, corner + Vector2(0, brk * sy), warm, 3.0)
 
 func _draw_toast(size: Vector2) -> void:
 	if toast_timer <= 0.0 or toast_text.is_empty():
 		return
 	var a := clampf(toast_timer / 0.35, 0.0, 1.0)
+	var punch := 1.0 + toast_punch * 1.35
 	var font := _font()
-	var fs := 26
+	var fs := int(26.0 * punch)
 	var tw := font.get_string_size(toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	var pos := Vector2((size.x - tw) * 0.5, board_origin.y + cell * ROWS * 0.32)
-	var pill := Rect2(pos - Vector2(18, 28), Vector2(tw + 36, 44))
-	var bg := Color(0.05, 0.07, 0.12, 0.78 * a)
+	var pill := Rect2(pos - Vector2(20, 30), Vector2(tw + 40, 48))
+	var bg := Color(0.04, 0.06, 0.11, 0.82 * a)
 	draw_rect(pill, bg, true)
-	draw_rect(pill, Color(_accent2().r, _accent2().g, _accent2().b, 0.60 * a), false, 1.5)
-	draw_string(font, pos + Vector2(1, 1), toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0, 0, 0, 0.4 * a))
+	draw_rect(pill, Color(_accent2().r, _accent2().g, _accent2().b, 0.72 * a), false, 2.0)
+	draw_string(font, pos + Vector2(2, 2), toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(0, 0, 0, 0.45 * a))
 	draw_string(font, pos, toast_text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color(1, 1, 1, a))
 
 func _draw_countdown(size: Vector2) -> void:
@@ -1773,9 +2019,9 @@ func _draw_ambient(size: Vector2) -> void:
 	var pulse := 0.5 + 0.5 * sin(title_pulse * 1.6)
 	var ac := _accent()
 	var ac2: Color = _theme()["accent2"]
-	draw_circle(Vector2(size.x * 0.22, size.y * 0.18), 140.0 + 18.0 * pulse, Color(ac.r, ac.g, ac.b, 0.06 + 0.03 * pulse))
-	draw_circle(Vector2(size.x * 0.82, size.y * 0.28), 110.0 + 14.0 * (1.0 - pulse), Color(ac2.r, ac2.g, ac2.b, 0.05 + 0.03 * pulse))
-	draw_circle(Vector2(size.x * 0.5, size.y * 0.78), 160.0, Color(ac.r, ac.g, ac.b, 0.035))
+	draw_circle(Vector2(size.x * 0.18, size.y * 0.16), 160.0 + 22.0 * pulse, Color(ac.r, ac.g, ac.b, 0.08 + 0.04 * pulse))
+	draw_circle(Vector2(size.x * 0.86, size.y * 0.26), 130.0 + 16.0 * (1.0 - pulse), Color(ac2.r, ac2.g, ac2.b, 0.07 + 0.04 * pulse))
+	draw_circle(Vector2(size.x * 0.5, size.y * 0.82), 180.0, Color(ac.r, ac.g, ac.b, 0.045))
 
 func _draw_menu_brand_glow(size: Vector2) -> void:
 	if screen != Screen.MENU:
@@ -1783,15 +2029,21 @@ func _draw_menu_brand_glow(size: Vector2) -> void:
 	var pulse := 0.5 + 0.5 * sin(title_pulse * 2.2)
 	var ac := _accent()
 	var ac2 := _accent2()
-	draw_circle(Vector2(size.x * 0.5, 92), 90.0 + 12.0 * pulse, Color(ac.r, ac.g, ac.b, 0.08 + 0.05 * pulse))
-	draw_circle(Vector2(size.x * 0.5 + 62, 92), 58.0 + 10.0 * (1.0 - pulse), Color(ac2.r, ac2.g, ac2.b, 0.07 + 0.04 * pulse))
+	var center := Vector2(size.x * 0.5, 108.0)
+	# Expanding pulse rings (Effect-inspired, low alpha).
+	for i in 3:
+		var phase := fposmod(title_pulse * 0.55 + float(i) * 0.33, 1.0)
+		var rr := 42.0 + phase * 95.0
+		var aa := (1.0 - phase) * (0.16 if i == 0 else 0.10)
+		draw_arc(center, rr, 0.0, TAU, 64, Color(ac.r, ac.g, ac.b, aa), 2.0)
+	draw_circle(center, 96.0 + 14.0 * pulse, Color(ac.r, ac.g, ac.b, 0.10 + 0.06 * pulse))
+	draw_circle(center + Vector2(58, 4), 62.0 + 10.0 * (1.0 - pulse), Color(ac2.r, ac2.g, ac2.b, 0.09 + 0.05 * pulse))
 
 func _draw_menu_blocks(size: Vector2) -> void:
 	var side := maxf(22.0, (size.x - CONTENT_MAX_W) * 0.5)
 	for b in menu_blocks:
 		var s: float = float(b["size"])
 		var nx := float(b["pos"].x)
-		# Confine the drifting decoration to the gutters beside the text column.
 		var span := side - 10.0 - s * 4.0
 		var x: float
 		if span > 20.0:
@@ -1802,51 +2054,64 @@ func _draw_menu_blocks(size: Vector2) -> void:
 		else:
 			x = nx * size.x
 		var base := Vector2(x, float(b["pos"].y) * size.y)
-		base.x += sin(float(b["phase"])) * float(b["drift"]) * (0.3 if span > 20.0 else 1.0)
+		base.x += sin(float(b["phase"])) * float(b["drift"]) * (0.35 if span > 20.0 else 1.0)
 		var t: int = int(b["type"])
 		var rot: int = int(b["rot"])
 		var col: Color = _colors()[t]
-		col.a = 0.14
-		var glow := col
-		glow.a = 0.05
+		col.a = 0.22
 		for c in PIECES[t][rot]:
 			var p := base + Vector2(c.x * s, c.y * s)
-			draw_rect(Rect2(p - Vector2(2, 2), Vector2(s + 4, s + 4)), glow, true)
-			draw_rect(Rect2(p, Vector2(s - 1, s - 1)), col, true)
+			var cell_r := Rect2(p, Vector2(s - 1.5, s - 1.5))
+			# Soft trail / glow.
+			draw_rect(cell_r.grow(3.0), Color(col.r, col.g, col.b, 0.06), true)
+			draw_rect(cell_r, col, true)
+			var hi := col.lightened(0.35)
+			hi.a = 0.35
+			draw_rect(Rect2(cell_r.position, Vector2(cell_r.size.x, cell_r.size.y * 0.32)), hi, true)
+			var shade := col.darkened(0.3)
+			shade.a = 0.3
+			draw_rect(Rect2(cell_r.position + Vector2(0, cell_r.size.y * 0.7), Vector2(cell_r.size.x, cell_r.size.y * 0.3)), shade, true)
+			draw_rect(cell_r, Color(1, 1, 1, 0.12), false, 1.0)
 
 func _draw_cell_at(origin: Vector2, c: Vector2i, color: Color, alpha: float) -> void:
 	var p := origin + Vector2(c.x * cell, c.y * cell)
-	var inset := 1.5
+	var inset := 1.8
 	var r := Rect2(p + Vector2(inset, inset), Vector2(cell - inset * 2, cell - inset * 2))
 	var col := color
 	col.a = alpha
-	# Soft drop shadow for depth.
 	if alpha >= 0.9:
-		draw_rect(Rect2(r.position + Vector2(1.5, 2.0), r.size), Color(0, 0, 0, 0.28), true)
+		draw_rect(Rect2(r.position + Vector2(1.8, 2.4), r.size), Color(0, 0, 0, 0.35), true)
 	draw_rect(r, col, true)
 	if alpha >= 0.85:
-		# Top highlight bevel.
-		var hi := color.lightened(0.28)
-		hi.a = 0.55 * alpha
-		draw_rect(Rect2(r.position, Vector2(r.size.x, r.size.y * 0.28)), hi, true)
-		# Left edge light.
-		var edge := color.lightened(0.12)
-		edge.a = 0.35 * alpha
-		draw_rect(Rect2(r.position, Vector2(r.size.x * 0.12, r.size.y)), edge, true)
-		# Bottom shade.
-		var shade := color.darkened(0.28)
-		shade.a = 0.35 * alpha
-		draw_rect(Rect2(r.position + Vector2(0, r.size.y * 0.72), Vector2(r.size.x, r.size.y * 0.28)), shade, true)
-		# Specular speck.
-		draw_rect(Rect2(r.position + Vector2(r.size.x * 0.18, r.size.y * 0.12), Vector2(r.size.x * 0.22, r.size.y * 0.08)), Color(1, 1, 1, 0.22 * alpha), true)
+		var hi := color.lightened(0.36)
+		hi.a = 0.62 * alpha
+		draw_rect(Rect2(r.position, Vector2(r.size.x, r.size.y * 0.30)), hi, true)
+		var edge := color.lightened(0.18)
+		edge.a = 0.42 * alpha
+		draw_rect(Rect2(r.position, Vector2(r.size.x * 0.14, r.size.y)), edge, true)
+		var shade := color.darkened(0.32)
+		shade.a = 0.42 * alpha
+		draw_rect(Rect2(r.position + Vector2(0, r.size.y * 0.68), Vector2(r.size.x, r.size.y * 0.32)), shade, true)
+		draw_rect(Rect2(r.position + Vector2(r.size.x * 0.16, r.size.y * 0.10), Vector2(r.size.x * 0.28, r.size.y * 0.09)), Color(1, 1, 1, 0.28 * alpha), true)
+		# Bright rim.
+		var rim := color.lightened(0.45)
+		rim.a = 0.55 * alpha
+		draw_rect(r, rim, false, 1.2)
 
 func _draw_ghost_cell(origin: Vector2, c: Vector2i, color: Color) -> void:
 	var p := origin + Vector2(c.x * cell, c.y * cell)
-	var r := Rect2(p + Vector2(3, 3), Vector2(cell - 6, cell - 6))
-	var outline := color
-	outline.a = 0.45
-	draw_rect(r, Color(color.r, color.g, color.b, 0.08), true)
-	draw_rect(r, outline, false, 1.5)
+	var r := Rect2(p + Vector2(2.5, 2.5), Vector2(cell - 5.0, cell - 5.0))
+	draw_rect(r, Color(color.r, color.g, color.b, 0.10), true)
+	var outline := color.lightened(0.15)
+	outline.a = 0.62
+	draw_rect(r, outline, false, 2.0)
+	# Corner ticks for a clearer landing guide.
+	var tick := minf(5.0, cell * 0.18)
+	var oc := Color(color.r, color.g, color.b, 0.75)
+	draw_line(r.position, r.position + Vector2(tick, 0), oc, 1.5)
+	draw_line(r.position, r.position + Vector2(0, tick), oc, 1.5)
+	draw_line(r.end, r.end - Vector2(tick, 0), oc, 1.5)
+	draw_line(r.end, r.end - Vector2(0, tick), oc, 1.5)
 
 func _draw_side_previews() -> void:
 	_draw_mini_box(hold_origin, preview_w, preview_cell, hold_type, "ホールド")
@@ -1854,13 +2119,13 @@ func _draw_side_previews() -> void:
 
 func _draw_mini_box(origin: Vector2, box_w: float, box_cell: float, piece_type: int, caption: String) -> void:
 	var panel := Rect2(origin - Vector2(8, 24), Vector2(box_w + 16, box_w + 36))
-	draw_rect(panel, Color(_theme()["panel"].r, _theme()["panel"].g, _theme()["panel"].b, 0.92), true)
-	draw_rect(panel, Color(_accent().r, _accent().g, _accent().b, 0.28), false, 1.5)
+	# Glass panel — UI retreats, board leads.
+	draw_rect(panel, Color(0.05, 0.08, 0.14, 0.72), true)
+	draw_rect(panel, Color(_accent().r, _accent().g, _accent().b, 0.35), false, 1.6)
 	var cap_size := int(clampf(box_w * 0.22, 9.0, 13.0))
-	draw_string(_font(), origin + Vector2(2, -8), caption, HORIZONTAL_ALIGNMENT_LEFT, box_w + 12.0, cap_size, Color(0.78, 0.84, 0.92))
+	draw_string(_font(), origin + Vector2(2, -8), caption, HORIZONTAL_ALIGNMENT_LEFT, box_w + 12.0, cap_size, Color(0.72, 0.82, 0.92, 0.9))
 	if piece_type < 0:
 		return
-	# Center piece in the box.
 	var min_x := 99
 	var max_x := -99
 	var min_y := 99
@@ -1877,10 +2142,12 @@ func _draw_mini_box(origin: Vector2, box_w: float, box_cell: float, piece_type: 
 	for c in PIECES[piece_type][0]:
 		var p := Vector2(ox + c.x * box_cell, oy + c.y * box_cell)
 		var col: Color = _colors()[piece_type]
-		draw_rect(Rect2(p + Vector2(1, 1), Vector2(box_cell - 2, box_cell - 2)), col, true)
-		var hi := col.lightened(0.25)
-		hi.a = 0.4
-		draw_rect(Rect2(p + Vector2(1, 1), Vector2(box_cell - 2, (box_cell - 2) * 0.28)), hi, true)
+		var cr := Rect2(p + Vector2(1, 1), Vector2(box_cell - 2, box_cell - 2))
+		draw_rect(cr, col, true)
+		var hi := col.lightened(0.3)
+		hi.a = 0.5
+		draw_rect(Rect2(cr.position, Vector2(cr.size.x, cr.size.y * 0.3)), hi, true)
+		draw_rect(cr, Color(1, 1, 1, 0.2), false, 1.0)
 
 # ---------------------------------------------------------------------------
 # UI builders
@@ -1892,18 +2159,24 @@ func _recalc_layout() -> void:
 
 	# Keep touch pads roughly square: their height follows the width each one
 	# gets, instead of stretching to fill a percentage of the screen.
-	var pad_gap := 10.0
-	var pad_btn_w := (size.x - 20.0 - pad_gap * (PAD_COUNT - 1)) / PAD_COUNT
-	var pad_btn_h := clampf(pad_btn_w * 0.85, 56.0, 88.0)
+	var pad_gap := 8.0
+	var visible_pads := 0
+	for b in pad_buttons:
+		if b.visible:
+			visible_pads += 1
+	var pad_n := maxi(visible_pads, 6)
+	var pad_btn_w := (size.x - 20.0 - pad_gap * (pad_n - 1)) / float(pad_n)
+	var pad_btn_h := clampf(pad_btn_w * 0.85, 52.0, 88.0)
 	pad_height = pad_btn_h + 44.0
 	if pad_root:
 		pad_root.offset_top = -(pad_btn_h + 22.0)
 		pad_root.offset_bottom = -22.0
 		var glyph_size := int(clampf(pad_btn_h * 0.34, 17.0, 28.0))
 		for b in pad_buttons:
-			b.custom_minimum_size = Vector2(48, pad_btn_h)
-			# The item slot holds two kanji, the rest hold a single glyph.
-			var fs := glyph_size if b != item_btn else int(glyph_size * 0.62)
+			b.custom_minimum_size = Vector2(44, pad_btn_h)
+			var fs := glyph_size
+			if b == item_btn or b == attack_btn:
+				fs = int(glyph_size * 0.55)
 			b.add_theme_font_size_override("font_size", fs)
 
 	var avail_h := size.y - hud_height - pad_height
@@ -1968,23 +2241,18 @@ func _build_menu() -> void:
 	var col := VBoxContainer.new()
 	col.add_theme_constant_override("separation", 4)
 	margin.add_child(col)
-	col.add_child(_spacer(28))
-	# Two-tone wordmark echoing the Aoitex logo: teal "AOI", coral "PULSE".
+	col.add_child(_spacer(36))
+	# Two-tone wordmark: teal AOI + coral PULSE — hero of the first viewport.
 	var brand := HBoxContainer.new()
 	brand.alignment = BoxContainer.ALIGNMENT_CENTER
-	brand.add_theme_constant_override("separation", 0)
+	brand.add_theme_constant_override("separation", 2)
 	brand_cool = _brand_part("AOI", _accent())
 	brand_warm = _brand_part("PULSE", _accent2())
 	brand.add_child(brand_cool)
 	brand.add_child(brand_warm)
 	col.add_child(brand)
-	col.add_child(_sub("ブロックパズル", 14))
-	col.add_child(_spacer(10))
-	menu_best_label = _make_label("最高スコア  0", 20, Color(0.95, 0.97, 1.0))
-	col.add_child(menu_best_label)
-	menu_xp_label = _sub("プレイヤー ／ XP 0", 12)
-	col.add_child(menu_xp_label)
-	col.add_child(_spacer(18))
+	col.add_child(_sub("リズムで消す", 16))
+	col.add_child(_spacer(22))
 	var scroll := _scroll()
 	col.add_child(scroll)
 	var list := _list()
@@ -1994,6 +2262,12 @@ func _build_menu() -> void:
 	_menu_item(list, "ランキング", "みんなの記録を見る", false, _on_lb_pressed)
 	_menu_item(list, "設定", "名前・サーバー・音・振動", false, _on_settings_pressed)
 	_menu_item(list, "遊び方", "操作方法とルールの説明", false, _on_howto_pressed)
+	# Quiet footer stats — not competing with brand/CTA.
+	list.add_child(_spacer(8))
+	menu_best_label = _make_label("最高スコア  0", 15, Color(0.62, 0.70, 0.82))
+	list.add_child(menu_best_label)
+	menu_xp_label = _sub("プレイヤー ／ XP 0", 12)
+	list.add_child(menu_xp_label)
 
 func _build_mode() -> void:
 	var parts := _screen_root("モードを選ぶ", "遊びたいルールを選んでください")
@@ -2002,6 +2276,7 @@ func _build_mode() -> void:
 	var list: VBoxContainer = parts[2]
 	_menu_item(list, "クラシック", "時間制限なし。レベルが上がるほど速くなります", true, func(): _start_local(Mode.CLASSIC))
 	_menu_item(list, "アドベンチャー", "ステージ制。ボム・宝箱・おじゃまの挑戦", true, func(): _start_local(Mode.ADVENTURE), true)
+	_menu_item(list, "回転なし", "出てきた向きのまま置く。回転ボタンは使えません", true, func(): _start_local(Mode.NO_ROTATE), true)
 	_menu_item(list, "スプリント（40ライン）", "40ライン消すまでの最速タイムをねらいます", true, func(): _start_local(Mode.SPRINT))
 	_menu_item(list, "ウルトラ（2分）", "2分間でどれだけスコアを稼げるか挑戦します", true, func(): _start_local(Mode.ULTRA))
 	_menu_item(list, "デイリーチャレンジ", "毎日変わる共通のお題。全員が同じブロック順です", true, func(): _start_local(Mode.DAILY))
@@ -2051,11 +2326,13 @@ func _build_howto() -> void:
 	_section(list, "高得点のコツ")
 	list.add_child(_body("・1度に多くのラインを消すほど高得点です（4ライン同時が最高）\n・続けて消すとコンボボーナスが入ります\n・うすい影は落下する位置の目安です", 19))
 	_section(list, "モードの違い")
-	list.add_child(_body("クラシック　…　時間制限なし。長く生き残る\nアドベンチャー　…　ステージ制。ボム・宝箱・おじゃま\nスプリント　…　40ライン消すまでのタイムを競う\nウルトラ　…　2分間でスコアを稼ぐ\nデイリー　…　毎日共通のお題で全員と勝負", 19))
+	list.add_child(_body("クラシック　…　時間制限なし。長く生き残る\nアドベンチャー　…　ステージ制。ボム・宝箱・おじゃま\n回転なし　…　出てきた向きのまま置く（回転不可）\nスプリント　…　40ライン消すまでのタイムを競う\nウルトラ　…　2分間でスコアを稼ぐ\nデイリー　…　毎日共通のお題で全員と勝負", 19))
 	_section(list, "アドベンチャーのコツ")
 	list.add_child(_body("入手：宝箱のラインを消すと道具が1つ入ります（すでに持っているとスコアに変わります）。\n使い方：下の「道具」ボタンをタップ。\n\n・ハンマー　…　いちばん上にあるブロックを1マス壊す\n・ライン消去　…　いちばん下の埋まっている行を消す\n・スロー　…　しばらく落下を遅くする\n・盾　…　自動でおじゃま1回を防ぐ（ボタン不要）\n\n・ボムはカウントがゼロになる前にそのラインを消す\n・5ステージごとに手数制限のボス戦", 18))
 	_section(list, "オンライン対戦のやり方")
-	list.add_child(_body("1. ホストが「部屋をつくる」を押すと4文字のコードが出ます（スプリント／ウルトラ／アドベンチャー）\n2. 友だちにコードを伝えます\n3. 友だちは「部屋に入る」でコードを入力します\n4. 全員が「準備OK」を押したらホストが開始します\n5. アドベンチャーは同じ種でステージ到達→スコアの順で順位が決まります", 19))
+	list.add_child(_body("1. ホストが「部屋をつくる」を押すと4文字のコードが出ます（スプリント／ウルトラ／アドベンチャー／回転なし）\n2. 友だちにコードを伝えます\n3. 友だちは「部屋に入る」でコードを入力します\n4. 全員が「準備OK」を押したらホストが開始します\n5. アドベンチャーは到達ステージ→スコア、回転なしはスコアで順位が決まります", 19))
+	_section(list, "アドベンチャーオンラインの攻撃")
+	list.add_child(_body("2ライン以上消す、または宝箱で攻撃チャージを貯めます（最大3）。\n下の「攻撃」ボタンで相手に送れます。チャージがないときはタップで種類切替。\n・ゴミ　…　おじゃま1段（盾で防げる）\n・バナナ　…　落ちているブロックの向きを乱す\n・ボム　…　盤面にボムを1つ置く\nクールダウン約6秒。順位はこれまでどおり到達ステージ優先です。", 18))
 	_screen_back(col, list, _on_back_menu)
 
 func _build_online() -> void:
@@ -2069,7 +2346,8 @@ func _build_online() -> void:
 	_section(list, "部屋をつくる（ホストになる）")
 	_menu_item(list, "スプリントの部屋をつくる", "40ラインの最速タイムを競います", true, func(): _online_create("sprint"))
 	_menu_item(list, "ウルトラの部屋をつくる", "2分間のスコアを競います", true, func(): _online_create("ultra"))
-	_menu_item(list, "アドベンチャーの部屋をつくる", "同じ種でステージ到達を競います（ボム・宝箱あり）", true, func(): _online_create("adventure"), true)
+	_menu_item(list, "アドベンチャーの部屋をつくる", "同じ種でステージ競争＋ゴミ／バナナ／ボム攻撃", true, func(): _online_create("adventure"), true)
+	_menu_item(list, "回転なしの部屋をつくる", "同じ種・回転なしでスコアを競います", true, func(): _online_create("norotate"), true)
 	_section(list, "部屋に入る（参加する）")
 	list.add_child(_body("ホストから聞いた4文字のコードを入力してください。", 16))
 	join_edit = _input_field("部屋コード（例：ABCD）")
@@ -2108,6 +2386,7 @@ func _build_leaderboard() -> void:
 	row.add_child(_tab_btn("スプリント", func(): if online: online.fetch_leaderboard("sprint")))
 	row.add_child(_tab_btn("ウルトラ", func(): if online: online.fetch_leaderboard("ultra")))
 	row.add_child(_tab_btn("冒険", func(): if online: online.fetch_leaderboard("adventure")))
+	row.add_child(_tab_btn("無回転", func(): if online: online.fetch_leaderboard("norotate")))
 	lb_label = _body("", 15)
 	list.add_child(lb_label)
 	_screen_back(col, list, _on_back_menu)
@@ -2125,13 +2404,14 @@ func _build_hud() -> void:
 	hud.add_theme_constant_override("separation", 1)
 	hud_root.add_child(hud)
 	hud_col = hud
-	score_label = _make_label("スコア 0", 26, _accent2())
+	score_label = _make_label("スコア 0", 30, _accent2())
 	score_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	score_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.5))
-	score_label.add_theme_constant_override("shadow_offset_y", 2)
-	high_label = _make_label("最高 0", 14, Color(0.72, 0.78, 0.88))
+	score_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
+	score_label.add_theme_constant_override("shadow_offset_x", 0)
+	score_label.add_theme_constant_override("shadow_offset_y", 3)
+	high_label = _make_label("最高 0", 13, Color(0.58, 0.66, 0.78))
 	high_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	timer_label = _make_label("", 14, Color(0.88, 0.93, 1.0))
+	timer_label = _make_label("", 13, Color(0.78, 0.86, 0.96))
 	timer_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	hud.add_child(score_label)
 	hud.add_child(high_label)
@@ -2139,9 +2419,9 @@ func _build_hud() -> void:
 	var stat := HBoxContainer.new()
 	stat.add_theme_constant_override("separation", 14)
 	hud.add_child(stat)
-	level_label = _make_label("レベル 1", 14, Color(0.82, 0.88, 0.96))
+	level_label = _make_label("レベル 1", 13, Color(0.70, 0.78, 0.90))
 	level_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	lines_label = _make_label("ライン 0", 14, Color(0.82, 0.88, 0.96))
+	lines_label = _make_label("ライン 0", 13, Color(0.70, 0.78, 0.90))
 	lines_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	stat.add_child(level_label)
 	stat.add_child(lines_label)
@@ -2177,9 +2457,9 @@ func _build_controls() -> void:
 	var hold := _pad("H")
 	hold.pressed.connect(_hold_piece)
 	pad_root.add_child(hold)
-	var rot := _pad("⟳")
-	rot.pressed.connect(_on_rotate_btn)
-	pad_root.add_child(rot)
+	rot_btn = _pad("⟳")
+	rot_btn.pressed.connect(_on_rotate_btn)
+	pad_root.add_child(rot_btn)
 	var down := _pad("▼")
 	down.button_down.connect(_on_soft_down)
 	down.button_up.connect(_on_soft_up)
@@ -2192,6 +2472,11 @@ func _build_controls() -> void:
 	item_btn.pressed.connect(_use_held_item)
 	item_btn.visible = false
 	pad_root.add_child(item_btn)
+	attack_btn = _pad("攻撃")
+	attack_btn.add_theme_font_size_override("font_size", 13)
+	attack_btn.pressed.connect(_on_attack_btn)
+	attack_btn.visible = false
+	pad_root.add_child(attack_btn)
 	var right := _pad("▶")
 	right.button_down.connect(_on_right_down)
 	right.button_up.connect(_on_right_up)
@@ -2207,6 +2492,20 @@ func _refresh_item_btn() -> void:
 	item_btn.set_meta("primary", held_item != ITEM_NONE)
 	item_btn.set_meta("warm", held_item != ITEM_NONE)
 	_apply_button_style(item_btn, held_item != ITEM_NONE)
+
+func _refresh_attack_btn() -> void:
+	if attack_btn == null:
+		return
+	var t := _attack_type_label(_current_attack_type())
+	var ready := attack_charges > 0 and attack_cooldown <= 0.0
+	if attack_cooldown > 0.0:
+		attack_btn.text = "攻撃×%d\n%s\nCD" % [attack_charges, t]
+	else:
+		attack_btn.text = "攻撃×%d\n%s" % [attack_charges, t]
+	attack_btn.add_theme_font_size_override("font_size", 12)
+	attack_btn.set_meta("primary", ready)
+	attack_btn.set_meta("warm", ready)
+	_apply_button_style(attack_btn, ready)
 
 func _build_overlay() -> void:
 	overlay = Control.new()
@@ -2269,10 +2568,12 @@ func _sub(text: String, size: int) -> Label:
 	return l
 
 func _brand_part(text: String, color: Color) -> Label:
-	var l := _make_label(text, 58, color)
-	l.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
+	var l := _make_label(text, 64, color)
+	l.add_theme_color_override("font_shadow_color", Color(color.r, color.g, color.b, 0.35))
 	l.add_theme_constant_override("shadow_offset_x", 0)
-	l.add_theme_constant_override("shadow_offset_y", 3)
+	l.add_theme_constant_override("shadow_offset_y", 4)
+	l.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.55))
+	l.add_theme_constant_override("outline_size", 4)
 	return l
 
 func _make_label(text: String, font_size: int, color: Color) -> Label:
@@ -2459,23 +2760,36 @@ func _restyle_tree(n: Node) -> void:
 
 func _apply_button_style(b: Button, primary: bool) -> void:
 	var warm := bool(b.get_meta("warm", false))
+	var pad_glass := bool(b.get_meta("pad", false))
 	var ac := _accent2() if warm else _accent()
+	var ac_cool := _accent()
+	var ac_warm := _accent2()
 	var normal := StyleBoxFlat.new()
 	if primary:
-		# Warm accents are darker to begin with, so they need a stronger mix to
-		# read as coral rather than brick.
-		var mix := 0.88 if warm else 0.55
-		normal.bg_color = Color(
-			lerpf(0.08, ac.r, mix),
-			lerpf(0.12, ac.g, mix),
-			lerpf(0.18, ac.b, mix),
-			0.96
-		)
-		normal.border_color = Color(ac.r, ac.g, ac.b, 0.55)
+		# Teal→coral punch: warm CTAs lean coral; cool primaries lean teal with coral edge.
+		if warm:
+			normal.bg_color = Color(
+				lerpf(0.10, ac_warm.r, 0.90),
+				lerpf(0.08, ac_warm.g, 0.90),
+				lerpf(0.12, ac_warm.b, 0.90),
+				0.98
+			)
+			normal.border_color = Color(ac_cool.r, ac_cool.g, ac_cool.b, 0.55)
+		else:
+			normal.bg_color = Color(
+				lerpf(0.06, ac_cool.r, 0.62),
+				lerpf(0.10, ac_cool.g, 0.62),
+				lerpf(0.16, ac_cool.b, 0.62),
+				0.98
+			)
+			normal.border_color = Color(ac_warm.r, ac_warm.g, ac_warm.b, 0.50)
+	elif pad_glass:
+		normal.bg_color = Color(0.06, 0.10, 0.18, 0.78)
+		normal.border_color = Color(ac.r, ac.g, ac.b, 0.32)
 	else:
-		normal.bg_color = Color(0.11, 0.14, 0.22, 0.94)
-		normal.border_color = Color(ac.r, ac.g, ac.b, 0.18)
-	normal.set_corner_radius_all(16)
+		normal.bg_color = Color(0.09, 0.12, 0.20, 0.92)
+		normal.border_color = Color(ac.r, ac.g, ac.b, 0.22)
+	normal.set_corner_radius_all(16 if not pad_glass else 14)
 	normal.content_margin_left = 12
 	normal.content_margin_right = 12
 	normal.content_margin_top = 10
@@ -2483,20 +2797,20 @@ func _apply_button_style(b: Button, primary: bool) -> void:
 	normal.border_width_left = 1
 	normal.border_width_top = 1
 	normal.border_width_right = 1
-	normal.border_width_bottom = 3
+	normal.border_width_bottom = 3 if primary else 2
 	var hover := normal.duplicate() as StyleBoxFlat
-	hover.bg_color = normal.bg_color.lightened(0.10)
-	hover.border_color = Color(ac.r, ac.g, ac.b, 0.45)
+	hover.bg_color = normal.bg_color.lightened(0.12)
+	hover.border_color = Color(ac.r, ac.g, ac.b, 0.55)
 	var pressed := normal.duplicate() as StyleBoxFlat
-	pressed.bg_color = normal.bg_color.darkened(0.14)
+	pressed.bg_color = normal.bg_color.darkened(0.16)
 	pressed.border_width_bottom = 1
 	pressed.content_margin_top = 12
 	b.add_theme_stylebox_override("normal", normal)
 	b.add_theme_stylebox_override("hover", hover)
 	b.add_theme_stylebox_override("pressed", pressed)
 	b.add_theme_stylebox_override("focus", hover)
-	b.add_theme_color_override("font_color", Color(0.94, 0.97, 1.0))
-	b.add_theme_color_override("font_pressed_color", Color(0.85, 0.90, 0.98))
+	b.add_theme_color_override("font_color", Color(0.96, 0.98, 1.0))
+	b.add_theme_color_override("font_pressed_color", Color(0.88, 0.92, 1.0))
 	b.add_theme_color_override("font_hover_color", Color.WHITE)
 
 func _refresh_labels() -> void:
@@ -2507,11 +2821,11 @@ func _refresh_labels() -> void:
 	if score_label:
 		score_label.text = "スコア %d" % score
 		if score_pop > 0.0:
-			score_label.add_theme_font_size_override("font_size", int(26 + score_pop * 14))
+			score_label.add_theme_font_size_override("font_size", int(30 + score_pop * 16))
 		else:
-			score_label.add_theme_font_size_override("font_size", 26)
+			score_label.add_theme_font_size_override("font_size", 30)
 	if high_label:
-		high_label.text = "最高 %d" % high_score
+		high_label.text = "最高 %d" % _current_high_score()
 	if level_label:
 		if _is_adventure():
 			level_label.text = "ステージ %d" % stage
@@ -2538,16 +2852,24 @@ func _refresh_labels() -> void:
 	if adventure_label:
 		if _is_adventure():
 			var sh := "　盾×%d" % shield_charges if shield_charges > 0 else ""
+			var atk := ""
+			if _pvp_attacks_enabled():
+				atk = "\n攻撃チャージ×%d　／　%s" % [attack_charges, _attack_type_label(_current_attack_type())]
 			if held_item != ITEM_NONE:
-				adventure_label.text = "道具：%s（タップで使用）%s\n%s" % [_item_label(held_item), sh, _item_hint(held_item)]
+				adventure_label.text = "道具：%s（タップで使用）%s\n%s%s" % [_item_label(held_item), sh, _item_hint(held_item), atk]
 			else:
-				adventure_label.text = "道具：なし%s\n宝箱ラインを消して入手" % sh
+				adventure_label.text = "道具：なし%s\n宝箱ラインを消して入手%s" % [sh, atk]
 			adventure_label.visible = true
 		else:
 			adventure_label.text = ""
 			adventure_label.visible = false
 	if item_btn:
 		item_btn.visible = _is_adventure() and screen == Screen.PLAY
+	if attack_btn:
+		attack_btn.visible = _pvp_attacks_enabled() and screen == Screen.PLAY
+		if attack_btn.visible:
+			_refresh_attack_btn()
+	_refresh_rotate_btn()
 
 # ---------------------------------------------------------------------------
 # Button callbacks / persistence
@@ -2638,6 +2960,48 @@ func _save_high_score(value: int) -> void:
 	f.store_32(value)
 	f.close()
 
+func _load_norotate_high() -> int:
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_PATH) != OK:
+		return 0
+	return int(cfg.get_value("scores", "norotate", 0))
+
+func _save_norotate_high(value: int) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_PATH)
+	cfg.set_value("scores", "norotate", value)
+	# Keep audio/theme keys if already present.
+	cfg.set_value("audio", "sfx", sfx_on)
+	cfg.set_value("audio", "music", music_on)
+	cfg.set_value("game", "haptic", haptic_on)
+	cfg.set_value("game", "theme", theme_idx)
+	cfg.save(SETTINGS_PATH)
+
+func _commit_run_high_score() -> void:
+	if _is_no_rotate():
+		if score > high_norotate:
+			high_norotate = score
+			_save_norotate_high(high_norotate)
+	elif score > high_score:
+		high_score = score
+		_save_high_score(high_score)
+
+func _refresh_rotate_btn() -> void:
+	if rot_btn == null:
+		return
+	var playing := screen == Screen.PLAY
+	if _is_no_rotate() and playing:
+		# Keep the slot so pad layout stays stable; grey it out.
+		rot_btn.visible = true
+		rot_btn.disabled = false
+		rot_btn.modulate = Color(0.55, 0.58, 0.65, 0.75)
+		rot_btn.set_meta("primary", false)
+		rot_btn.set_meta("warm", false)
+		_apply_button_style(rot_btn, false)
+	else:
+		rot_btn.visible = playing
+		rot_btn.modulate = Color.WHITE
+
 func _load_settings() -> void:
 	var cfg := ConfigFile.new()
 	if cfg.load(SETTINGS_PATH) != OK:
@@ -2649,8 +3013,10 @@ func _load_settings() -> void:
 
 func _save_settings() -> void:
 	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_PATH)
 	cfg.set_value("audio", "sfx", sfx_on)
 	cfg.set_value("audio", "music", music_on)
 	cfg.set_value("game", "haptic", haptic_on)
 	cfg.set_value("game", "theme", theme_idx)
+	cfg.set_value("scores", "norotate", high_norotate)
 	cfg.save(SETTINGS_PATH)
