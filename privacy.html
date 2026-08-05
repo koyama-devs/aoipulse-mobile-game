@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AOIPulse Privacy Policy — Aoitex</title>
+  <title>AOIPulse Privacy Policy / プライバシーポリシー — Aoitex</title>
   <style>
     :root {
       --bg: #0f1220;
@@ -11,14 +11,15 @@
       --text: #eef2ff;
       --muted: #a8b0c4;
       --accent: #4ad4eb;
+      --line: #2a3350;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: "Segoe UI", system-ui, sans-serif;
+      font-family: "Segoe UI", "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", system-ui, sans-serif;
       background: radial-gradient(1200px 600px at 50% -10%, #1a3040, var(--bg));
       color: var(--text);
-      line-height: 1.6;
+      line-height: 1.7;
     }
     main {
       max-width: 720px;
@@ -26,23 +27,95 @@
       padding: 48px 20px 80px;
     }
     h1 { color: var(--accent); letter-spacing: 0.04em; margin-bottom: 0.2rem; }
-    .meta { color: var(--muted); margin-bottom: 2rem; }
+    .meta { color: var(--muted); margin-bottom: 1.25rem; }
     h2 { margin-top: 2rem; font-size: 1.15rem; }
     ul { padding-left: 1.2rem; }
     a { color: var(--accent); }
     .card {
       background: color-mix(in srgb, var(--panel) 90%, black);
-      border: 1px solid #2a3350;
+      border: 1px solid var(--line);
       border-radius: 16px;
       padding: 20px 22px;
     }
+    .lang-switch {
+      display: inline-flex;
+      gap: 8px;
+      margin-bottom: 1.25rem;
+    }
+    .lang-switch button {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--muted);
+      border-radius: 999px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .lang-switch button[aria-pressed="true"] {
+      color: var(--bg);
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    .panel[hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <main>
     <h1>AOIPulse</h1>
-    <p class="meta">Privacy Policy · Publisher: Aoitex · Last updated: 2026-08-04</p>
-    <div class="card">
+    <p class="meta">Privacy Policy / プライバシーポリシー · Publisher: Aoitex · Last updated: 2026-08-05</p>
+
+    <div class="lang-switch" role="group" aria-label="Language">
+      <button type="button" id="btn-ja" aria-pressed="true">日本語</button>
+      <button type="button" id="btn-en" aria-pressed="false">English</button>
+    </div>
+
+    <div class="card panel" id="panel-ja" lang="ja">
+      <p>AOIPulse はオフラインプレイに加え、任意のオンライン機能を備えたパズルゲームです。収集するデータは必要最小限にとどめます。</p>
+
+      <h2>端末内に保存する情報</h2>
+      <ul>
+        <li>ハイスコアおよびローカル設定（サウンド、音楽、振動、テーマ、スキン、表示名）</li>
+        <li>オンライン用のプレイヤー ID / 表示名キャッシュ（ルーム再接続やリーダーボード用）</li>
+      </ul>
+      <p>これらの値は端末上のアプリ保存領域にのみ保持されます。</p>
+
+      <h2>任意のオンライン機能</h2>
+      <p>オンライン対戦、デイリーチャレンジ同期、リーダーボードを利用する場合、ゲームサーバーへ接続し、次の情報を送信することがあります。</p>
+      <ul>
+        <li>選択した表示名</li>
+        <li>ルーム参加 / 準備完了 / 対戦結果（スコア、ライン、タイム、ステージ）</li>
+        <li>提出したモードのリーダーボードスコア</li>
+      </ul>
+      <p>ゲーム内で Google アカウントログインは必須ではありません。オンラインプレイでは端末に保存された生成プレイヤー ID を使用します。</p>
+
+      <h2>収集しないもの</h2>
+      <ul>
+        <li>広告識別子</li>
+        <li>現行ストア版での分析 / クラッシュ追跡ツール</li>
+        <li>連絡先、位置情報、マイク、カメラのデータ</li>
+        <li>個人データの販売</li>
+      </ul>
+
+      <h2>権限</h2>
+      <ul>
+        <li><strong>インターネット</strong> — 任意のオンラインルーム、デイリーシード / リーダーボード、サーバー疎通確認</li>
+        <li><strong>バイブレーション</strong> — 任意の触覚フィードバック（設定でオフにできます）</li>
+      </ul>
+      <p>オフラインの基本モードは、オンライン機能を使わずに利用できます。</p>
+
+      <h2>子どもについて</h2>
+      <p>本ゲームは全年齢向けです。任意のオンラインプレイに必要な範囲（表示名とスコア）を超えて、子どもから意図的にデータを収集することはありません。</p>
+
+      <h2>お問い合わせ</h2>
+      <p>プライバシーに関するお問い合わせは、Google Play の AOIPulse ストア掲載に記載のサポート用メールアドレスまでご連絡ください。</p>
+
+      <h2>変更について</h2>
+      <p>本ポリシーを変更する場合は、上記の更新日およびストア情報を更新します。</p>
+    </div>
+
+    <div class="card panel" id="panel-en" lang="en" hidden>
       <p>AOIPulse is a puzzle game with offline modes and optional online features. We collect as little data as possible.</p>
 
       <h2>What we store on your device</h2>
@@ -86,5 +159,31 @@
       <p>If this policy changes, we will update the date above and the store listing.</p>
     </div>
   </main>
+  <script>
+    (function () {
+      var btnJa = document.getElementById("btn-ja");
+      var btnEn = document.getElementById("btn-en");
+      var panelJa = document.getElementById("panel-ja");
+      var panelEn = document.getElementById("panel-en");
+      function show(lang) {
+        var isJa = lang === "ja";
+        panelJa.hidden = !isJa;
+        panelEn.hidden = isJa;
+        btnJa.setAttribute("aria-pressed", isJa ? "true" : "false");
+        btnEn.setAttribute("aria-pressed", isJa ? "false" : "true");
+        document.documentElement.lang = lang;
+        try { localStorage.setItem("aoipulse-privacy-lang", lang); } catch (e) {}
+      }
+      btnJa.addEventListener("click", function () { show("ja"); });
+      btnEn.addEventListener("click", function () { show("en"); });
+      var saved = null;
+      try { saved = localStorage.getItem("aoipulse-privacy-lang"); } catch (e) {}
+      if (saved === "en" || saved === "ja") {
+        show(saved);
+      } else if ((navigator.language || "").toLowerCase().indexOf("ja") !== 0) {
+        show("en");
+      }
+    })();
+  </script>
 </body>
 </html>
